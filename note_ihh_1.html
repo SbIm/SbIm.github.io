@@ -1,0 +1,145 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+##iOS Hacker's Handbook 读书笔记(一)
+用github开了一个新的博客了， 其实很久之前就想写这样一个读书笔记的系列。 一方面记录自己读了些什么， 一方面督促自己多读书。
+最近在读iOS Hacker's HandBook，按照自己的理解简单地做一些记录。
+
+Chapter 1: iOS Security Basics
+做攻击需要两个要素：一个是找到软件本身所存在的漏洞，一个是利用这个漏洞在设备上执行恶意代码。iOS系统从这两个角度出发，做了一系列的安全措施。这里大致描述一下。
+
+The Reduced Attack Surface：尽可能少地暴露代码，减少iOS的功能。例如，java和flash都是不被iOS所支持的。这样做的目的是"reduce the attack surface of iOS"。
+
+The Stripped-Down iOS：被XX的iOS？意思是减少iOS上可以使用的app。例如shell。
+
+Privilege Separation：权限分离。不同的app拥有不同的权限。这样即使攻击者拿到了某个进程的控制权，也无法执行逾越权限的代码。例如，app store里面下载的程序都被指定为user mobile权限。
+
+Code Signing：代码签名。所有的二进制文件、lib库必须是经过trusted authority (such as Apple)的签名才能被内核允许执行。内存中，只有那些来自于经过签名的源的page才能被执行。
+
+Data Execution Prevention：数据执行保护。即防止数据被当作代码执行的机制。iOS里面通过代码签名实现DEP。即使使用ROP这种技术绕过DEP，由于内存中的page在签名之前是不能被执行的，攻击者也不能执行其他的代码(shell code 或者其他程序)。  
+关于ROP，可以在[这里](http://www.hacker.com.cn/show-10-1996-1.html)做进一步的了解。后续的文章中也会提到。
+
+Address space layout randomization：通过使内存中的对象位置布局随机化，让攻击者无法定位到代码的位置。
+
+Sandboxing：沙盒通过更加细粒度的控制，让应用与应用之间隔离，使应用无法拿到额外的权限。例如，第三方的app无法控制SMS发送信息。
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h2 id="ioshackershandbook">iOS Hacker's Handbook 读书笔记(一)</h2>
+
+<p>用github开了一个新的博客了， 其实很久之前就想写这样一个读书笔记的系列。 一方面记录自己读了些什么， 一方面督促自己多读书。
+最近在读iOS Hacker's HandBook，按照自己的理解简单地做一些记录。</p>
+
+<p>Chapter 1: iOS Security Basics
+做攻击需要两个要素：一个是找到软件本身所存在的漏洞，一个是利用这个漏洞在设备上执行恶意代码。iOS系统从这两个角度出发，做了一系列的安全措施。这里大致描述一下。</p>
+
+<p>The Reduced Attack Surface：尽可能少地暴露代码，减少iOS的功能。例如，java和flash都是不被iOS所支持的。这样做的目的是"reduce the attack surface of iOS"。</p>
+
+<p>The Stripped-Down iOS：被XX的iOS？意思是减少iOS上可以使用的app。例如shell。</p>
+
+<p>Privilege Separation：权限分离。不同的app拥有不同的权限。这样即使攻击者拿到了某个进程的控制权，也无法执行逾越权限的代码。例如，app store里面下载的程序都被指定为user mobile权限。</p>
+
+<p>Code Signing：代码签名。所有的二进制文件、lib库必须是经过trusted authority (such as Apple)的签名才能被内核允许执行。内存中，只有那些来自于经过签名的源的page才能被执行。</p>
+
+<p>Data Execution Prevention：数据执行保护。即防止数据被当作代码执行的机制。iOS里面通过代码签名实现DEP。即使使用ROP这种技术绕过DEP，由于内存中的page在签名之前是不能被执行的，攻击者也不能执行其他的代码(shell code 或者其他程序)。 <br>
+关于ROP，可以在<a href="http://www.hacker.com.cn/show-10-1996-1.html">这里</a>做进一步的了解。后续的文章中也会提到。</p>
+
+<p>Address space layout randomization：通过使内存中的对象位置布局随机化，让攻击者无法定位到代码的位置。</p>
+
+<p>Sandboxing：沙盒通过更加细粒度的控制，让应用与应用之间隔离，使应用无法拿到额外的权限。例如，第三方的app无法控制SMS发送信息。</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "note_ihh_1.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+</body>
+</html>
