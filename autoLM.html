@@ -1,0 +1,146 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+上周做了一个微信的抢红包插件，简单记一下研究过程。  
+##实现思路  
+1.打开微信，发送一个红包，点开，进入"拆红包"界面；  
+2.ssh到设备，使用cycript，打印出当前视图tree，定位到"拆红包"这个View对应的类，确认拆红包动作所使用的方法OpenRedEnvelopesRequest:；  
+3.decrypt砸壳，使用hopper反汇编；  
+4.解读生成的反汇编代码，"拆红包"这个方法所做的事情为生成一个数组，并最后，把这个数组传入OpenRedEnvelopesRequest这个消息作为参数，发起红包请求；  
+5.分析生成数组的过程，发现核心点是拿到m_c2cnativeUrl这个参数；  
+6.使用lldb调试，查出set_mNativeUrl这个方法的调用栈；  
+7.定位到CMessageMgr这个类；  
+8.使用tweak hook这个类里的可疑方法，发现收到消息时，调用了AsyncOnAddMsg， 并且传入了一个CMessagewWrap作为参数；  
+9.剩下的就是hook这个AsyncOnAddMsg，组装OpenRedEnvelopesRequest:所需要的数据，最后发起抢红包请求；
+
+
+##Tips
+1.砸壳的原理：先讲加密的app加载进入内存，再把内存中的数据dump出来；  
+2.Cycript的原理，根据一个在iOS simulator上进行cycript调试的流程，做一个简单的推测：使用cycript绑定到进程，实际上是把cycript的动态库注入到进程中，这个动态库的作用是利用runtime，动态生成类、方法，动态调用； 而Cycript终端与进程之间的通信，则是使用的Socket实现；  
+3.Cycrpte-choose(class)的实现，是从堆内存中，搜寻大小、形式和Class一样的区域出来；  
+
+4.adds  这里的s， 代表是否影响cpsr寄存器；  
+5.i(ttetet)   gt    if(then|then|else|then…) gt；  
+6.push.w ， thumb指令集中，代表该指令为32位；
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<p>上周做了一个微信的抢红包插件，简单记一下研究过程。  </p>
+
+<h2 id="">实现思路</h2>
+
+<p>1.打开微信，发送一个红包，点开，进入"拆红包"界面； <br>
+2.ssh到设备，使用cycript，打印出当前视图tree，定位到"拆红包"这个View对应的类，确认拆红包动作所使用的方法OpenRedEnvelopesRequest:； <br>
+3.decrypt砸壳，使用hopper反汇编； <br>
+4.解读生成的反汇编代码，"拆红包"这个方法所做的事情为生成一个数组，并最后，把这个数组传入OpenRedEnvelopesRequest这个消息作为参数，发起红包请求； <br>
+5.分析生成数组的过程，发现核心点是拿到m<em>c2cnativeUrl这个参数； <br>
+6.使用lldb调试，查出set</em>mNativeUrl这个方法的调用栈； <br>
+7.定位到CMessageMgr这个类； <br>
+8.使用tweak hook这个类里的可疑方法，发现收到消息时，调用了AsyncOnAddMsg， 并且传入了一个CMessagewWrap作为参数； <br>
+9.剩下的就是hook这个AsyncOnAddMsg，组装OpenRedEnvelopesRequest:所需要的数据，最后发起抢红包请求；</p>
+
+<h2 id="tips">Tips</h2>
+
+<p>1.砸壳的原理：先讲加密的app加载进入内存，再把内存中的数据dump出来； <br>
+2.Cycript的原理，根据一个在iOS simulator上进行cycript调试的流程，做一个简单的推测：使用cycript绑定到进程，实际上是把cycript的动态库注入到进程中，这个动态库的作用是利用runtime，动态生成类、方法，动态调用； 而Cycript终端与进程之间的通信，则是使用的Socket实现； <br>
+3.Cycrpte-choose(class)的实现，是从堆内存中，搜寻大小、形式和Class一样的区域出来；  </p>
+
+<p>4.adds  这里的s， 代表是否影响cpsr寄存器； <br>
+5.i(ttetet)   gt    if(then|then|else|then…) gt； <br>
+6.push.w ， thumb指令集中，代表该指令为32位；</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "autoLM.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
