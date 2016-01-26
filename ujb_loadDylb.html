@@ -29,7 +29,7 @@
 对这个非越狱很感兴趣，查了下相关的资料，可能的做法如下：  
 1.[在越狱环境下调试，反汇编，分析发送红包的逻辑](http://sbim.github.io/autoLM.html)；  
 2.完成一个dylib，利用rumtime实现对关键方法的hook；  
-3.注入app，重新签名 
+3.直接修改 Mach-O Load Command 表，将dylib注入app，重新签名 
 <!-- markdown end -->
 </div>
 <div class="entry" id="main">
@@ -38,7 +38,7 @@
 对这个非越狱很感兴趣，查了下相关的资料，可能的做法如下： <br>
 1.<a href="http://sbim.github.io/autoLM.html">在越狱环境下调试，反汇编，分析发送红包的逻辑</a>； <br>
 2.完成一个dylib，利用rumtime实现对关键方法的hook； <br>
-3.注入app，重新签名 </p>
+3.直接修改 Mach-O Load Command 表，将dylib注入app，重新签名 </p>
 <!-- content end -->
 </div>
 <br>
