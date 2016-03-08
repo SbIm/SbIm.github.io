@@ -1,0 +1,173 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+#ROP
+ 
+##缓冲区溢出
+
+*  A.	发起函数调用时的过程和栈的结构都是类似的：  
+	函数参数入栈(依次、从右至左)  
+	返回地址入栈  
+	调用函数  
+	当前栈地址入栈  
+	开辟栈空间(局部变量、缓冲区)
+
+*  B.	像iOS这种平台则是将部分数据特别是返回地址保存在了寄存器里，更为安全(相对)：  
+	函数参数进入寄存器和栈(R0:receiver, R1:selector, R2:arg0, R3:arg1, stack_1:arg4....)  
+	返回地址进入LR  
+	调用函数  
+	当前栈地址入栈  
+	开辟栈空间(局部变量、缓冲区)
+	
+*	C.	对于A，缓冲区溢出攻击的思路是: [AAAAAAAA...][ShellCode][Ret], 通过覆盖返回地址，将PC指针引导向我们的ShellCode；缺点是无法绕过DEP, ASLR, Stack Guard等防御手段；
+
+
+##Ret2libc
+
+*  当应用了DEP时，无法执行我们自己写的ShellCode，这时候，可以覆盖返回地址为现有的函数地址，比如利用libc中的函数; 构造参数(例如，"bin/sh")入栈，跳转到对应的函数例如System
+
+*  当利用了ASLR时，大体上就是两个思路：考虑使用地址不变的代码例如iOS中的dyld_shared_cache；通过漏洞泄漏有用的信息，实时获取需要的某些函数的地址，通过计算确认需要使用的地址；
+
+
+##Rop
+
+* 	从上面到这里，我们关注的对象依次是ShellCode, Functions, Gadgets; 它的基本思路是，在返回地址里返回到包涵返回指令的代码片段上，这时候就可以利用代码片段的返回指令前的一段指令序列进行特定的操作；
+
+* 	像通过栈来保存返回地址的这种CPU，可以在栈里面多次写入返回地址，多次利用gadgets的组合来达到目的；
+
+* 	iOS 这种通过寄存器来保存返回地址的，就无法通过简单的缓冲区溢出覆盖了；[蒸米的文章](http://drops.wooyun.org/papers/12355)里面，讲了一种十分巧妙思路，利用iOS的selector记录缓存，达到劫持selector，控制PC到我们特定的地址的目的；  
+	并且由于receiver是我们自己构造的特殊的结构体，我们可以控制R0，只要找到通过R0控制其他寄存器的gadgets，就可以通过receiver特殊的结构，在R1, R2, R3这样寄存器里面配置函数参数，达到我们想要的目的
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h1 id="rop">ROP</h1>
+
+<h2 id="">缓冲区溢出</h2>
+
+<ul>
+<li><p>A.    发起函数调用时的过程和栈的结构都是类似的： <br>
+函数参数入栈(依次、从右至左) <br>
+返回地址入栈 <br>
+调用函数 <br>
+当前栈地址入栈 <br>
+开辟栈空间(局部变量、缓冲区)</p></li>
+<li><p>B.    像iOS这种平台则是将部分数据特别是返回地址保存在了寄存器里，更为安全(相对)： <br>
+函数参数进入寄存器和栈(R0:receiver, R1:selector, R2:arg0, R3:arg1, stack_1:arg4....) <br>
+返回地址进入LR <br>
+调用函数 <br>
+当前栈地址入栈 <br>
+开辟栈空间(局部变量、缓冲区)</p></li>
+<li><p>C.  对于A，缓冲区溢出攻击的思路是: [AAAAAAAA...][ShellCode][Ret], 通过覆盖返回地址，将PC指针引导向我们的ShellCode；缺点是无法绕过DEP, ASLR, Stack Guard等防御手段；</p></li>
+</ul>
+
+<h2 id="ret2libc">Ret2libc</h2>
+
+<ul>
+<li><p>当应用了DEP时，无法执行我们自己写的ShellCode，这时候，可以覆盖返回地址为现有的函数地址，比如利用libc中的函数; 构造参数(例如，"bin/sh")入栈，跳转到对应的函数例如System</p></li>
+<li><p>当利用了ASLR时，大体上就是两个思路：考虑使用地址不变的代码例如iOS中的dyld<em>shared</em>cache；通过漏洞泄漏有用的信息，实时获取需要的某些函数的地址，通过计算确认需要使用的地址；</p></li>
+</ul>
+
+<h2 id="rop">Rop</h2>
+
+<ul>
+<li><p>从上面到这里，我们关注的对象依次是ShellCode, Functions, Gadgets; 它的基本思路是，在返回地址里返回到包涵返回指令的代码片段上，这时候就可以利用代码片段的返回指令前的一段指令序列进行特定的操作；</p></li>
+<li><p>像通过栈来保存返回地址的这种CPU，可以在栈里面多次写入返回地址，多次利用gadgets的组合来达到目的；</p></li>
+<li><p>iOS 这种通过寄存器来保存返回地址的，就无法通过简单的缓冲区溢出覆盖了；<a href="http://drops.wooyun.org/papers/12355">蒸米的文章</a>里面，讲了一种十分巧妙思路，利用iOS的selector记录缓存，达到劫持selector，控制PC到我们特定的地址的目的； <br>
+并且由于receiver是我们自己构造的特殊的结构体，我们可以控制R0，只要找到通过R0控制其他寄存器的gadgets，就可以通过receiver特殊的结构，在R1, R2, R3这样寄存器里面配置函数参数，达到我们想要的目的</p></li>
+</ul>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "rop.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
