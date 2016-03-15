@@ -36,7 +36,8 @@
 4. 修改src目录下的jailbreak.c， 只保留backup exploit的部分  
 5. make生成可执行程序，执行  
 6. 将backup的记录，使用idevicebackup2 unback解密，可以看到其中有我们插入的文件  
-7.  idevicebackup2 store
+7.  idevicebackup2 store  
+8. 重新执行backup，发现并没有我们的软链接目录和文件，可以判断是备份回去的时候，文件被备份到了软链接所指向的目录
 
 ####一些点：  
 
@@ -44,7 +45,9 @@
   
 *   很容易能搜索到mbdb文件的解密的代码，这个文件的结构其实很简单，一个mbdb头，后面便是key-Vaule这种结构的data，当然data里面并没有存储key的信息； 具体结构可以在iphoneWiki中查到；  
 
-*   mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？  
+*   mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？
+
+*   不知道这种漏洞一开始是怎么被发现的。。。我觉得思路也许是从分析mbdb文件，发现其中的LinkTarget字段开始。。。
 
 
 ####jailbreak.c: 
@@ -104,14 +107,16 @@
 4. 修改src目录下的jailbreak.c， 只保留backup exploit的部分 <br>
 5. make生成可执行程序，执行 <br>
 6. 将backup的记录，使用idevicebackup2 unback解密，可以看到其中有我们插入的文件 <br>
-7.  idevicebackup2 store</p>
+7.  idevicebackup2 store <br>
+8. 重新执行backup，发现并没有我们的软链接目录和文件，可以判断是备份回去的时候，文件被备份到了软链接所指向的目录</p>
 
 <h4 id="">一些点：</h4>
 
 <ul>
 <li><p>生成目录、软链接目录的过程实际上没有生成对应的sha1加密的文件名文件，而只是在修改了Manifest.mbdb里面的记录，这个文件实际代表了backup文件里的所有目录结构</p></li>
 <li><p>很容易能搜索到mbdb文件的解密的代码，这个文件的结构其实很简单，一个mbdb头，后面便是key-Vaule这种结构的data，当然data里面并没有存储key的信息； 具体结构可以在iphoneWiki中查到；  </p></li>
-<li><p>mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？  </p></li>
+<li><p>mbdb的k-v结构中，有一个key叫做LinkTarget，看了下插入symlink的代码，实际上就是在设置这个字段，也直接导致了后续的漏洞利用，还没有想明白为什么苹果在这里要加一个字段，也许备份文件本身里面也有软链接？</p></li>
+<li><p>不知道这种漏洞一开始是怎么被发现的。。。我觉得思路也许是从分析mbdb文件，发现其中的LinkTarget字段开始。。。</p></li>
 </ul>
 
 <h4 id="jailbreakc">jailbreak.c:</h4>
