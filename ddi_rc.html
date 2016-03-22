@@ -126,7 +126,9 @@ race condition绕过这个签名校验的方法就是，使用正确的dmg和正
       }
     }
 ###hax.dmg:   
-hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现；  
+hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现，lockdown本身其实就是个守护进程；在wiki上查到了关于lockdown的描述如下：  
+>The lockdown daemon, always running on the iPhone, in charge of monitoring activation status, Carrier Debug status, and FairPlay stuff, amongst other things.  
+
 这里的hax镜像内的内容是两个，一个是mount root分区为可读写， 一个是配置afc2服务；  
 通过LockDown启动这两个服务，就可以访问和读写root分区，算是实现了沙箱逃逸吧～
 <!-- markdown end -->
@@ -241,8 +243,13 @@ Retry:
 
 <h3 id="haxdmg">hax.dmg:</h3>
 
-<p>hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现； <br>
-这里的hax镜像内的内容是两个，一个是mount root分区为可读写， 一个是配置afc2服务； <br>
+<p>hax这个被替代的镜像的目录结构里，有内容的只有LockDown/ServiceAgents这个目录，里面是两个plist文件，LockDown可以通过这个plist的内容加载相应的命令； 有意思的是，LockDown这个程序它是有root权限的； 一开始想不通到底为什么，后来看了ddi中的plist就明白了，像debugserver、instrument这种工具，需要root权限才能实现，lockdown本身其实就是个守护进程；在wiki上查到了关于lockdown的描述如下：  </p>
+
+<blockquote>
+  <p>The lockdown daemon, always running on the iPhone, in charge of monitoring activation status, Carrier Debug status, and FairPlay stuff, amongst other things.  </p>
+</blockquote>
+
+<p>这里的hax镜像内的内容是两个，一个是mount root分区为可读写， 一个是配置afc2服务； <br>
 通过LockDown启动这两个服务，就可以访问和读写root分区，算是实现了沙箱逃逸吧～</p>
 <!-- content end -->
 </div>
