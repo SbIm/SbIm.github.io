@@ -76,64 +76,7 @@
 </div>
 <div class="entry" id="main">
 <!-- content -->
-<p>这几天一直在分析P0sixSpawn的内核untether部分。虽然它的源码是开源的，但是也只是开源了userland相关的部分，到了内核层，只能看到一个二进制untether。 <br>
-每次iOS系统启动的时候，会通过launchd.conf，在<code>DYLD_INSERT_LIBRARIES</code>环境变量中设置一个_TEXT段为空的dylib，这样这个dylib就可以pass代码签名校验。它的利用re-export，用一些可以控制必然返回0的函数例如CFEqual，替换掉libmis.dylib里的代码签名校验函数<code>kMISValidationOptionValidateSignatureOnly</code>、<code>kMISValidationOptionExpectedHash</code>、<code>MISValidateSignature</code>，这样就可以绕过代码签名。 <br>
-这里主要记录分析untether部分，不细说这个dylib的结构，它的目的也是为了能够执行untether这个二进制。untether的作用则是给内核打上相关的补丁，从内核层面去掉iOS的一些安全检查机制。 <br>
-关于untether查了一些资料，尝试过给@iH8sn0w发邮件请求帮助，也尝试过逆向untether。最后还是有很多东西没能理解，这里暂时把自己学习到的一些东西以自己的理解先记录下来。希望通过后面的学习，回过来看能够对它有更多的了解。  </p>
 
-<h3 id="xnu">XNU</h3>
-
-<p>1.使用<code>mach_msg with ool descriptor</code>，可以在内核空间创造一片堆内存，他描述了mach消息所要附加的数据的地址、大小，以及如何处理数据的指令。 <br>
-查看xnu的源码，可以看到它的send_msg大致执行流程：  </p>
-
-<pre><code>mach_msg--&gt;  
-mach_msg_trap--&gt;
-mach_msg_overwrite_trap--&gt;  
-ipc_kmsg_copyin_body--&gt;  
-ipc_kmsg_copyin_ool_descriptor--&gt;  
-copyin  
-</code></pre>
-
-<p>这里把用户空间的descriptor拷贝到了内核空间，当数据的大小在4096字节一下，也会在内核空间中拷贝一份。也就是说，我们可以通过它来控制内核的堆内存的创建；同样的，通过receivemsg，我们可以控制内核去释放这片堆内存。  </p>
-
-<p>2.setrlimit可以设置进程所拥有的最大的fd的数量，在OS X下已经测试过，默认的最大值是256；使用setrlimit调高rlim<em>_</em>cur之后，可以通过dup2重定向文件描述符，来使用当前的最大文件描述符号，来触发fdalloc，fdalloc会重新分配一片堆内存，用来存储fd;每个fd的size为(sizeof(struct file*) + sizeof(char))，即5个字节。重要的一点是，fdalloc中，会重新为进程对应的filedesc结构分配内存空间，重要的<code>fd_ofileflags</code>也将被重定位。xnu源码中的调用流程为：  </p>
-
-<pre><code>dup2--&gt;    
-fdalloc--&gt;  
-MALLOC_ZONE  
-</code></pre>
-
-<p>3.posix<em>spawn即<code>fork+exec</code>组合的变体，posix</em>spawn的好处在于，它没有因为fork创建子进程而造成额外的资源消耗，而是在子进程调用exec前挂起父进程并且父子进程共享虚拟地址空间，也不会因为执行exec时发生死锁问题造成父子进程的互相等待。另外，和本文相关的是，执行posix_spawn的时候，可以指定子进程要执行的一些文件描述符操作例如打开、关闭、复制等，而这些文件操作都是在内核中进行的。 <br>
-执行文件操作时，文件操作的数据被从用户空间复制到了内核空间。 <br>
-相关源码在<code>kern_exec.c--&gt;posix_spawn</code>函数。  </p>
-
-<h3 id="vuln">Vuln</h3>
-
-<p>1.posix_spawn在执行文件操作的时候，仅仅检验了文件操作的数量的上下限，但是并没有检验是否有这么多个完整的文件操作数据。这也就是说，如果向内核中写入了不完整的File Actions，通过读取文件操作数据的最后面的内容，有可能会使一部分处在缓冲区之外的数据暴露出来。这个漏洞为后续的运行时修改文件描述符提供了条件。  </p>
-
-<p>2.PSFA_INHERIT这个文件操作在内存中发生了写操作，具体的写的内容是向<code>fd_ofilflags[fd]</code>这个byte和0x20做按位或操作。但是问题是fd的值在进行这个文件操作之前已经做过了一次校验。这里可以通过文件锁来制造一个百分百成功率的竞态条件来在校验和写入两个操作之间，结合1，使用另一个内核线程，改变File Action缓冲区后面的那片内存中的数据(需要进行堆风水来控制堆内存分配)。这时候fd的取值可以是任意值，也就是说，我们可以将任何的和<code>fd_ofileflags</code>地址的相对fd偏移位置的地址中的值和0x20做按位或操作。  </p>
-
-<p>3.Azimuth的<code>vm_map_copy_t</code>自我重定位技术，详细介绍可以看一下<code>iOS6 kernel Security : A Hacker's Guide</code>这个ppt。结合2中的相对写操作，以及堆风水，可以得到一个内核指针，并计算出<code>ofile_flags</code>的内核地址。也就是说，可以在内核的任意位置进行写操作了。  </p>
-
-<h3 id="exploit">Exploit</h3>
-
-<p>梳理一下攻击流程： <br>
-1.使用<code>OOL mach_msg</code>创建堆内存，来填充kalloc.1536，使后续能分配到连续的堆内存; <br>
-2.触发<code>setrlimit+dup2</code>，使<code>fd_ofileflags</code>被重定位到新分配的堆内存中; <br>
-3.执行posix<em>spawn, 执行文件操作<code>FA1 + close A + open B</code>，其中FA1和部分的close A是利用Vuln中的1所分配，剩余部分则是使用<code>OOL mach_msg</code>所分配。这里我思考了一下为什么<code>vm_map_copy_t</code>这种结构的header部分不会影响到File Action的解析。一个<code>_psfa_action</code>结构是1040字节，其中大部分是表示打开操作的文件路径<code>psfao_path</code>，对于open操作，可能是header部分被放在了前一个<code>_psfa_action</code>的<code>psfao_path</code>的"\0"结束符后面，对于其他操作，header部分被放在了无用的<code>psfao_path</code>区域。posix</em>spawn的loop1中，执行到close A时，解开了A的文件锁，open B等待B文件锁被某个线程释放; <br>
-4.另一个线程中则是负责创建内核堆中的部分close A以及整个的close B。它占有了B文件锁，一直在等待A文件锁释放，A释放之后，同样使用<code>OOL mach_msg</code> receive msg 以及 send msg, 就可以重新在这一片堆内存中写入数据;重新写入的数据为PSFA<em>DUP2和PSFA</em>INHERIT, 通过PSFA<em>DUP2可以实现任意写入fd的值，通过PSFA</em>INHERIT实现了数据的写入； <br>
-5.写入的地点是第一个<code>mach_msg</code>所分配的<code>vm_map_copy_t</code>的size地址与<code>fd_ofileflags</code>的相对位置，使size的值增大了，这样的话使用receivemsg就可以dump出后面的<code>vm_map_copy_t</code>区域以及<code>filedesc</code>区域。dump出来的内容会包含内核指针以及<code>fd_ofileflags</code>。只要把内核dump出来之后，我们就能实现内核内存的任意写操作。</p>
-
-<h3 id="doubts">Doubts</h3>
-
-<p>通过查的资料和阅读untether的反编译代码的一些关键函数，基本可以猜测攻击流程是如上所述。但是从反编译代码中还是有很多不理解的地方： <br>
-1.untether中使用setrlimit提高进程能持有的最大文件描述符数量到了12000，并且创建了5000个pipe(10000个文件描述符)，不知道这样有什么意义； <br>
-2.没有发现堆风水; <br>
-3.fileActions的布局和想象中的数据结构不太一样;  </p>
-
-<p>感觉Pseudocode有时候比起ARM更容易让人困惑，比如这里的SendHeapLayouts函数，把两个内存中连续的不同的数据结构当成了一个数组...这方面类似的分析还是没啥经验。  </p>
-
-<p>哈哈，好想找一份源代码看一下:)</p>
 <!-- content end -->
 </div>
 <br>
