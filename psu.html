@@ -48,7 +48,7 @@
 	fdalloc-->  
 	MALLOC_ZONE  
 
-3.posix_spawn即`fork+exec`组合的变体，posix_spawn的好处在于，它没有因为fork创建子进程而造成额外的资源消耗，而是在子进程调用exec前挂起父进程并且父子进程共享虚拟地址空间，也不会因为执行exec时发生死锁问题造成父子进程的互相等待。另外，和本文相关的是，执行posix_spawn的时候，可以指定子进程要执行的一些文件描述符操作例如打开、关闭、复制等，而这些文件操作都是在内核中进行的。  
+3.`posix_spawn`即`fork+exec`组合的变体，`posix_spawn`的好处在于，它没有因为fork创建子进程而造成额外的资源消耗，而是在子进程调用exec前挂起父进程并且父子进程共享虚拟地址空间，也不会因为执行exec时发生死锁问题造成父子进程的互相等待。另外，和本文相关的是，执行`posix_spawn`的时候，可以指定子进程要执行的一些文件描述符操作例如打开、关闭、复制等，而这些文件操作都是在内核中进行的。  
 执行文件操作时，文件操作的数据被从用户空间复制到了内核空间。  
 相关源码在`kern_exec.c-->posix_spawn`函数。  
 ###Vuln  
@@ -61,8 +61,8 @@
 梳理一下攻击流程：  
 1.使用`OOL mach_msg`创建堆内存，来填充kalloc.1536，使后续能分配到连续的堆内存;  
 2.触发`setrlimit+dup2`，使`fd_ofileflags`被重定位到新分配的堆内存中;  
-3.执行posix_spawn, 执行文件操作`FA1 + close A + open B`，其中FA1和部分的close A是利用Vuln中的1所分配，剩余部分则是使用`OOL mach_msg`所分配。这里我思考了一下为什么`vm_map_copy_t`这种结构的header部分不会影响到File Action的解析。一个`_psfa_action `结构是1040字节，其中大部分是表示打开操作的文件路径`psfao_path `，对于open操作，可能是header部分被放在了前一个`_psfa_action`的`psfao_path`的"\0"结束符后面，对于其他操作，header部分被放在了无用的`psfao_path`区域。posix_spawn的loop1中，执行到close A时，解开了A的文件锁，open B等待B文件锁被某个线程释放;  
-4.另一个线程中则是负责创建内核堆中的部分close A以及整个的close B。它占有了B文件锁，一直在等待A文件锁释放，A释放之后，同样使用`OOL mach_msg` receive msg 以及 send msg, 就可以重新在这一片堆内存中写入数据;重新写入的数据为PSFA_DUP2和PSFA_INHERIT, 通过PSFA_DUP2可以实现任意写入fd的值，通过PSFA_INHERIT实现了数据的写入；  
+3.执行`posix_spawn`, 执行文件操作`FA1 + close A + open B`，其中FA1和部分的close A是利用Vuln中的1所分配，剩余部分则是使用`OOL mach_msg`所分配。这里我思考了一下为什么`vm_map_copy_t`这种结构的header部分不会影响到File Action的解析。一个`_psfa_action `结构是1040字节，其中大部分是表示打开操作的文件路径`psfao_path `，对于open操作，可能是header部分被放在了前一个`_psfa_action`的`psfao_path`的"\0"结束符后面，对于其他操作，header部分被放在了无用的`psfao_path`区域。`posix_spawn`的loop1中，执行到close A时，解开了A的文件锁，open B等待B文件锁被某个线程释放;  
+4.另一个线程中则是负责创建内核堆中的部分close A以及整个的close B。它占有了B文件锁，一直在等待A文件锁释放，A释放之后，同样使用`OOL mach_msg` receive msg 以及 send msg, 就可以重新在这一片堆内存中写入数据;重新写入的数据为`PSFA_DUP2`和`PSFA_INHERIT`, 通过`PSFA_DUP2`可以实现任意写入fd的值，通过`PSFA_INHERIT`实现了数据的写入；  
 5.写入的地点是第一个`mach_msg`所分配的`vm_map_copy_t`的size地址与`fd_ofileflags`的相对位置，使size的值增大了，这样的话使用receivemsg就可以dump出后面的`vm_map_copy_t`区域以及`filedesc`区域。dump出来的内容会包含内核指针以及`fd_ofileflags `。只要把内核dump出来之后，我们就能实现内核内存的任意写操作。
 ###Doubts  
 通过查的资料和阅读untether的反编译代码的一些关键函数，基本可以猜测攻击流程是如上所述。但是从反编译代码中还是有很多不理解的地方：  
@@ -104,7 +104,7 @@ fdalloc--&gt;
 MALLOC_ZONE  
 </code></pre>
 
-<p>3.posix<em>spawn即<code>fork+exec</code>组合的变体，posix</em>spawn的好处在于，它没有因为fork创建子进程而造成额外的资源消耗，而是在子进程调用exec前挂起父进程并且父子进程共享虚拟地址空间，也不会因为执行exec时发生死锁问题造成父子进程的互相等待。另外，和本文相关的是，执行posix_spawn的时候，可以指定子进程要执行的一些文件描述符操作例如打开、关闭、复制等，而这些文件操作都是在内核中进行的。 <br>
+<p>3.<code>posix_spawn</code>即<code>fork+exec</code>组合的变体，<code>posix_spawn</code>的好处在于，它没有因为fork创建子进程而造成额外的资源消耗，而是在子进程调用exec前挂起父进程并且父子进程共享虚拟地址空间，也不会因为执行exec时发生死锁问题造成父子进程的互相等待。另外，和本文相关的是，执行<code>posix_spawn</code>的时候，可以指定子进程要执行的一些文件描述符操作例如打开、关闭、复制等，而这些文件操作都是在内核中进行的。 <br>
 执行文件操作时，文件操作的数据被从用户空间复制到了内核空间。 <br>
 相关源码在<code>kern_exec.c--&gt;posix_spawn</code>函数。  </p>
 
@@ -121,8 +121,8 @@ MALLOC_ZONE
 <p>梳理一下攻击流程： <br>
 1.使用<code>OOL mach_msg</code>创建堆内存，来填充kalloc.1536，使后续能分配到连续的堆内存; <br>
 2.触发<code>setrlimit+dup2</code>，使<code>fd_ofileflags</code>被重定位到新分配的堆内存中; <br>
-3.执行posix<em>spawn, 执行文件操作<code>FA1 + close A + open B</code>，其中FA1和部分的close A是利用Vuln中的1所分配，剩余部分则是使用<code>OOL mach_msg</code>所分配。这里我思考了一下为什么<code>vm_map_copy_t</code>这种结构的header部分不会影响到File Action的解析。一个<code>_psfa_action</code>结构是1040字节，其中大部分是表示打开操作的文件路径<code>psfao_path</code>，对于open操作，可能是header部分被放在了前一个<code>_psfa_action</code>的<code>psfao_path</code>的"\0"结束符后面，对于其他操作，header部分被放在了无用的<code>psfao_path</code>区域。posix</em>spawn的loop1中，执行到close A时，解开了A的文件锁，open B等待B文件锁被某个线程释放; <br>
-4.另一个线程中则是负责创建内核堆中的部分close A以及整个的close B。它占有了B文件锁，一直在等待A文件锁释放，A释放之后，同样使用<code>OOL mach_msg</code> receive msg 以及 send msg, 就可以重新在这一片堆内存中写入数据;重新写入的数据为PSFA<em>DUP2和PSFA</em>INHERIT, 通过PSFA<em>DUP2可以实现任意写入fd的值，通过PSFA</em>INHERIT实现了数据的写入； <br>
+3.执行<code>posix_spawn</code>, 执行文件操作<code>FA1 + close A + open B</code>，其中FA1和部分的close A是利用Vuln中的1所分配，剩余部分则是使用<code>OOL mach_msg</code>所分配。这里我思考了一下为什么<code>vm_map_copy_t</code>这种结构的header部分不会影响到File Action的解析。一个<code>_psfa_action</code>结构是1040字节，其中大部分是表示打开操作的文件路径<code>psfao_path</code>，对于open操作，可能是header部分被放在了前一个<code>_psfa_action</code>的<code>psfao_path</code>的"\0"结束符后面，对于其他操作，header部分被放在了无用的<code>psfao_path</code>区域。<code>posix_spawn</code>的loop1中，执行到close A时，解开了A的文件锁，open B等待B文件锁被某个线程释放; <br>
+4.另一个线程中则是负责创建内核堆中的部分close A以及整个的close B。它占有了B文件锁，一直在等待A文件锁释放，A释放之后，同样使用<code>OOL mach_msg</code> receive msg 以及 send msg, 就可以重新在这一片堆内存中写入数据;重新写入的数据为<code>PSFA_DUP2</code>和<code>PSFA_INHERIT</code>, 通过<code>PSFA_DUP2</code>可以实现任意写入fd的值，通过<code>PSFA_INHERIT</code>实现了数据的写入； <br>
 5.写入的地点是第一个<code>mach_msg</code>所分配的<code>vm_map_copy_t</code>的size地址与<code>fd_ofileflags</code>的相对位置，使size的值增大了，这样的话使用receivemsg就可以dump出后面的<code>vm_map_copy_t</code>区域以及<code>filedesc</code>区域。dump出来的内容会包含内核指针以及<code>fd_ofileflags</code>。只要把内核dump出来之后，我们就能实现内核内存的任意写操作。</p>
 
 <h3 id="doubts">Doubts</h3>
