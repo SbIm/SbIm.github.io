@@ -1,0 +1,128 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+按照查到的资料，简单记一下iOS5的越狱工具Absinthe的工作原理。  
+
+注入点：利用afc的软链接和文件备份；修改racoon.config。有意思的是，这个软链接bug被修复后，在iOS6的越狱中文件备份的软链接bug又被利用了。  
+  
+用户态：  
+racoon守护进程读取config文件时，可以在isakmp_cfg_config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4_index 和 nbns4_index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置；  
+这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存；  
+iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload；  
+payload的目的，一个是计算dyld shared cache的ASLR偏移量，以获取更多的gadgets；另一个是执行内核攻击；  
+
+内核态：  
+在payload种，向OpenBSD packet filter发送特定序列的操作符，可以在内存中，减小任意的byte——一个内核任意写漏洞  
+攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<p>按照查到的资料，简单记一下iOS5的越狱工具Absinthe的工作原理。  </p>
+
+<p>注入点：利用afc的软链接和文件备份；修改racoon.config。有意思的是，这个软链接bug被修复后，在iOS6的越狱中文件备份的软链接bug又被利用了。  </p>
+
+<p>用户态： <br>
+racoon守护进程读取config文件时，可以在isakmp<em>cfg</em>config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4<em>index 和 nbns4</em>index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置； <br>
+这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存； <br>
+iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload； <br>
+payload的目的，一个是计算dyld shared cache的ASLR偏移量，以获取更多的gadgets；另一个是执行内核攻击；  </p>
+
+<p>内核态： <br>
+在payload种，向OpenBSD packet filter发送特定序列的操作符，可以在内存中，减小任意的byte——一个内核任意写漏洞 <br>
+攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "corona.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
