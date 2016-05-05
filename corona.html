@@ -33,11 +33,11 @@
 racoon守护进程读取config文件时，可以在isakmp_cfg_config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4_index 和 nbns4_index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置；  
 这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存；  
 iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload；  
-payload的目的，一个是计算dyld shared cache的ASLR偏移量，以获取更多的gadgets；另一个是执行内核攻击；  
+payload的目的，一个是计算dyld shared cache的偏移以及获取更多的gadgets；另一个是执行内核攻击；  
 
 内核态：  
 在payload种，向OpenBSD packet filter发送特定序列的操作符，可以在内存中，减小任意的byte——一个内核任意写漏洞  
-攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。
+攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。进而可以对没有KASLR的iOS5内核进行patch。
 <!-- markdown end -->
 </div>
 <div class="entry" id="main">
@@ -50,11 +50,11 @@ payload的目的，一个是计算dyld shared cache的ASLR偏移量，以获取�
 racoon守护进程读取config文件时，可以在isakmp<em>cfg</em>config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4<em>index 和 nbns4</em>index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置； <br>
 这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存； <br>
 iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload； <br>
-payload的目的，一个是计算dyld shared cache的ASLR偏移量，以获取更多的gadgets；另一个是执行内核攻击；  </p>
+payload的目的，一个是计算dyld shared cache的偏移以及获取更多的gadgets；另一个是执行内核攻击；  </p>
 
 <p>内核态： <br>
 在payload种，向OpenBSD packet filter发送特定序列的操作符，可以在内存中，减小任意的byte——一个内核任意写漏洞 <br>
-攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。</p>
+攻击方法依然是修改syscall，修改一个syscall的指针，指向用户态的空间中的payload。进而可以对没有KASLR的iOS5内核进行patch。</p>
 <!-- content end -->
 </div>
 <br>
