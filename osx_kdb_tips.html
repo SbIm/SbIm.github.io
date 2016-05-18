@@ -34,7 +34,7 @@
 `csrutil disable`  
 3.`sudo nvram boot-args="debug=0x141 kext-dev-mode=1 kcsuffix=development pmuflags=1 -v"` 调试内核的启动参数， 详见[内核调试文档](https://developer.apple.com/library/mac/documentation/Darwin/Conceptual/KernelProgramming/build/build.html#//apple_ref/doc/uid/TP30000905-CH221-SW2)  
 4.物理机中配置arp解析，把虚拟机的IP解析到虚拟机的网卡物理地址，如果安装了Vmware Tools，实际上这一步可以省略。  
-5.`sudo kextcache -invalidate` 让OS X的kext cache无效，使用新的内核调试。  
+5.`sudo kextcache -invalidate` 让OS X的kext cache无效，使用新的内核驱动调试。  
 6.`lldb && target create [PATH OF KERNEL SYMBOLS];  
 kdp-remote [IP OF VM];  
 breakpoint set --name [FUNC NAME TO DEBUG]`  
@@ -67,7 +67,7 @@ bt`
 <code>csrutil disable</code> <br>
 3.<code>sudo nvram boot-args="debug=0x141 kext-dev-mode=1 kcsuffix=development pmuflags=1 -v"</code> 调试内核的启动参数， 详见<a href="https://developer.apple.com/library/mac/documentation/Darwin/Conceptual/KernelProgramming/build/build.html#//apple_ref/doc/uid/TP30000905-CH221-SW2">内核调试文档</a> <br>
 4.物理机中配置arp解析，把虚拟机的IP解析到虚拟机的网卡物理地址，如果安装了Vmware Tools，实际上这一步可以省略。 <br>
-5.<code>sudo kextcache -invalidate</code> 让OS X的kext cache无效，使用新的内核调试。 <br>
+5.<code>sudo kextcache -invalidate</code> 让OS X的kext cache无效，使用新的内核驱动调试。 <br>
 6.<code>lldb &amp;&amp; target create [PATH OF KERNEL SYMBOLS]; <br>
 kdp-remote [IP OF VM]; <br>
 breakpoint set --name [FUNC NAME TO DEBUG]</code>  </p>
