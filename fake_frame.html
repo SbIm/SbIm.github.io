@@ -25,7 +25,7 @@
 	</div>
 <div id="md" style="display: none;">
 <!-- markdown -->
-研究fusion level02的过程中，利用到了栈桢的伪造，详细地分析了一下。  
+研究fusion level02的过程中，利用到了栈桢的伪造。  
 这个题号称是有NES, NEH, ASLR三种保护的，但是实际利用的过程中，有两点很关键：  
 1 .bss这个segment是可以执行的  
 2 ASLR仅仅针对于所分配的堆栈位置，而并不影响进程的其它内存空间布局，也不影响共享库的地址  
@@ -95,7 +95,7 @@ d处又一个`leave | ret`这个可以理解为在ebp处开始构造新的栈桢
 </div>
 <div class="entry" id="main">
 <!-- content -->
-<p>研究fusion level02的过程中，利用到了栈桢的伪造，详细地分析了一下。 <br>
+<p>研究fusion level02的过程中，利用到了栈桢的伪造。 <br>
 这个题号称是有NES, NEH, ASLR三种保护的，但是实际利用的过程中，有两点很关键： <br>
 1 .bss这个segment是可以执行的 <br>
 2 ASLR仅仅针对于所分配的堆栈位置，而并不影响进程的其它内存空间布局，也不影响共享库的地址  </p>
