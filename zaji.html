@@ -37,8 +37,6 @@ maintenance info sections 显示进程空间中各个段状态(如got，text, bs
 
 崩溃之后，没有提示的时候，利用dmesg(print or control the kernel ring buffer); 或者查看/var/log 下面系统日志或内核日志
 
-
-
 堆内存free之后，先合并，再放入unsorted bin中，unsorted bin的作用是使得能有第二次机会(第一次机会是 fast bin)利用最近释放的chunk，对大小没有限制  
 XNU的`vm_allocate`：小块内存的分配由malloc直接从内存池中分配、复用，内存池是由`vm_allocate`分配； 大块内存的分配是由`vm_allocate`直接分配  
 <!-- markdown end -->
