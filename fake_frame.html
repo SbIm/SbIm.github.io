@@ -1,0 +1,238 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+研究fusion level02的过程中，利用到了栈桢的伪造，详细地分析了一下。  
+这个题号称是有NES, NEH, ASLR三种保护的，但是实际利用的过程中，有两点很关键：  
+1 .bss这个segment是可以执行的  
+2 ASLR仅仅针对于所分配的堆栈位置，而并不影响进程的其它内存空间布局，也不影响共享库的地址  
+
+###思路
+1.程序中加密用的key是static类型，也就是只会从/dev/random获取一次，并且加密所用的异或运算是可逆的； 通过向程序发送一串数据，根据输出数据可以计算的到key; 用所得到的key发送反加密过的数据，就可以往缓冲区中写入可以人为控制的数据。  
+2.溢出点在`nread(0, buffer, sz);`这一行，这里的关键点是，这里的sz是可以人为控制输入的，这样可以往缓冲区写入任意大小的数据；  
+3.利用ROP完成任意代码执行
+
+###Fake Frame
+1.ROPgadget -file [program] -g  
+从结果中可以选出要用的gadget片段如下：  
+`0x08048b13: pop %ebp | ret`  
+
+2.溢出的数据串及作用:  
+`pop %ebp | ret`---a  
+`addr of bss`---b  
+`nread`---c  
+`leave | ret`---d  
+`0`---e  
+`bss`---f  
+`100`---g   
+前一个函数之行完毕后，执行`leave="mov esp ebp | pop ebp";`, 这时候ebp指向b，esp指向a； 接着将执行`ret=pop eip`并且esp指向b；  
+`pop %ebp | ret`,让ebp保存了bss段的起始地址(esp指向c，ebp指向b)，接着pop eip，esp指向了d并开始执行c;  
+nread的实际代码如下  
+<pre><code>   0x0804952d <+0>:	push   %ebp
+   0x0804952e <+1>:	mov    %esp,%ebp
+   0x08049530 <+3>:	sub    $0x28,%esp
+   0x08049533 <+6>:	mov    0xc(%ebp),%eax
+   0x08049536 <+9>:	mov    %eax,-0x14(%ebp)
+   0x08049539 <+12>:	movl   $0x0,-0x10(%ebp)
+   0x08049540 <+19>:	movl   $0x0,-0x18(%ebp)
+   0x08049547 <+26>:	mov    -0x18(%ebp),%eax
+   0x0804954a <+29>:	mov    %eax,-0xc(%ebp)
+   0x0804954d <+32>:	jmp    0x8049593 <nread+102>
+   0x0804954f <+34>:	mov    -0x10(%ebp),%eax
+   0x08049552 <+37>:	mov    0x10(%ebp),%edx
+   0x08049555 <+40>:	sub    %eax,%edx
+   0x08049557 <+42>:	mov    -0x10(%ebp),%eax
+   0x0804955a <+45>:	mov    -0x14(%ebp),%ecx
+   0x0804955d <+48>:	add    %ecx,%eax
+   0x0804955f <+50>:	mov    %edx,0x8(%esp)
+   0x08049563 <+54>:	mov    %eax,0x4(%esp)
+   0x08049567 <+58>:	mov    0x8(%ebp),%eax
+   0x0804956a <+61>:	mov    %eax,(%esp)
+   0x0804956d <+64>:	call   0x8048860 <read@plt>
+   0x08049572 <+69>:	mov    %eax,-0x18(%ebp)
+   0x08049575 <+72>:	cmpl   $0x0,-0x18(%ebp)
+   0x08049579 <+76>:	jg     0x8049587 <nread+90>
+   0x0804957b <+78>:	movl   $0x1,(%esp)
+   0x08049582 <+85>:	call   0x8048960 <exit@plt>
+   0x08049587 <+90>:	mov    -0x18(%ebp),%eax
+   0x0804958a <+93>:	add    %eax,-0xc(%ebp)
+   0x0804958d <+96>:	mov    -0x18(%ebp),%eax
+   0x08049590 <+99>:	add    %eax,-0x10(%ebp)
+   0x08049593 <+102>:	mov    -0x10(%ebp),%eax
+   0x08049596 <+105>:	cmp    0x10(%ebp),%eax
+   0x08049599 <+108>:	jb     0x804954f <nread+34>
+   0x0804959b <+110>:	mov    -0xc(%ebp),%eax
+   0x0804959e <+113>:	leave  
+   0x0804959f <+114>:	ret  </code></pre>
+函数利用了0x8(%ebp),0xc(%ebp),0x10(%ebp)也就是e,f,g三处的值作为参数，最终效果是通过nread往bss地址处写入了size为100的数据;  
+同时可以看到开头的`push %ebp | mov %esp,%ebp`和结尾的`leave | ret`保持了栈桢的平衡，并开始执行d;  
+d处又一个`leave | ret`这个可以理解为在ebp处开始构造新的栈桢，执行完毕后，ebp=&bss，esp=&bss+8，并执行&bss+4处的代码；  
+由于此题中bss段是可执行的，可以做任何事了，例如通过execve唤起一个shell。  
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<p>研究fusion level02的过程中，利用到了栈桢的伪造，详细地分析了一下。 <br>
+这个题号称是有NES, NEH, ASLR三种保护的，但是实际利用的过程中，有两点很关键： <br>
+1 .bss这个segment是可以执行的 <br>
+2 ASLR仅仅针对于所分配的堆栈位置，而并不影响进程的其它内存空间布局，也不影响共享库的地址  </p>
+
+<h3 id="">思路</h3>
+
+<p>1.程序中加密用的key是static类型，也就是只会从/dev/random获取一次，并且加密所用的异或运算是可逆的； 通过向程序发送一串数据，根据输出数据可以计算的到key; 用所得到的key发送反加密过的数据，就可以往缓冲区中写入可以人为控制的数据。 <br>
+2.溢出点在<code>nread(0, buffer, sz);</code>这一行，这里的关键点是，这里的sz是可以人为控制输入的，这样可以往缓冲区写入任意大小的数据； <br>
+3.利用ROP完成任意代码执行</p>
+
+<h3 id="fakeframe">Fake Frame</h3>
+
+<p>1.ROPgadget -file [program] -g <br>
+从结果中可以选出要用的gadget片段如下： <br>
+<code>0x08048b13: pop %ebp | ret</code>  </p>
+
+<p>2.溢出的数据串及作用: <br>
+<code>pop %ebp | ret</code>---a <br>
+<code>addr of bss</code>---b <br>
+<code>nread</code>---c <br>
+<code>leave | ret</code>---d <br>
+<code>0</code>---e <br>
+<code>bss</code>---f <br>
+<code>100</code>---g <br>
+前一个函数之行完毕后，执行<code>leave="mov esp ebp | pop ebp";</code>, 这时候ebp指向b，esp指向a； 接着将执行<code>ret=pop eip</code>并且esp指向b； <br>
+<code>pop %ebp | ret</code>,让ebp保存了bss段的起始地址(esp指向c，ebp指向b)，接着pop eip，esp指向了d并开始执行c; <br>
+nread的实际代码如下  </p>
+
+<pre><code>   0x0804952d &lt;+0&gt;:    push   %ebp
+   0x0804952e &lt;+1&gt;:    mov    %esp,%ebp
+   0x08049530 &lt;+3&gt;:    sub    $0x28,%esp
+   0x08049533 &lt;+6&gt;:    mov    0xc(%ebp),%eax
+   0x08049536 &lt;+9&gt;:    mov    %eax,-0x14(%ebp)
+   0x08049539 &lt;+12&gt;:    movl   $0x0,-0x10(%ebp)
+   0x08049540 &lt;+19&gt;:    movl   $0x0,-0x18(%ebp)
+   0x08049547 &lt;+26&gt;:    mov    -0x18(%ebp),%eax
+   0x0804954a &lt;+29&gt;:    mov    %eax,-0xc(%ebp)
+   0x0804954d &lt;+32&gt;:    jmp    0x8049593 <nread+102>
+   0x0804954f &lt;+34&gt;:    mov    -0x10(%ebp),%eax
+   0x08049552 &lt;+37&gt;:    mov    0x10(%ebp),%edx
+   0x08049555 &lt;+40&gt;:    sub    %eax,%edx
+   0x08049557 &lt;+42&gt;:    mov    -0x10(%ebp),%eax
+   0x0804955a &lt;+45&gt;:    mov    -0x14(%ebp),%ecx
+   0x0804955d &lt;+48&gt;:    add    %ecx,%eax
+   0x0804955f &lt;+50&gt;:    mov    %edx,0x8(%esp)
+   0x08049563 &lt;+54&gt;:    mov    %eax,0x4(%esp)
+   0x08049567 &lt;+58&gt;:    mov    0x8(%ebp),%eax
+   0x0804956a &lt;+61&gt;:    mov    %eax,(%esp)
+   0x0804956d &lt;+64&gt;:    call   0x8048860 <read@plt>
+   0x08049572 &lt;+69&gt;:    mov    %eax,-0x18(%ebp)
+   0x08049575 &lt;+72&gt;:    cmpl   $0x0,-0x18(%ebp)
+   0x08049579 &lt;+76&gt;:    jg     0x8049587 <nread+90>
+   0x0804957b &lt;+78&gt;:    movl   $0x1,(%esp)
+   0x08049582 &lt;+85&gt;:    call   0x8048960 <exit@plt>
+   0x08049587 &lt;+90&gt;:    mov    -0x18(%ebp),%eax
+   0x0804958a &lt;+93&gt;:    add    %eax,-0xc(%ebp)
+   0x0804958d &lt;+96&gt;:    mov    -0x18(%ebp),%eax
+   0x08049590 &lt;+99&gt;:    add    %eax,-0x10(%ebp)
+   0x08049593 &lt;+102&gt;:    mov    -0x10(%ebp),%eax
+   0x08049596 &lt;+105&gt;:    cmp    0x10(%ebp),%eax
+   0x08049599 &lt;+108&gt;:    jb     0x804954f <nread+34>
+   0x0804959b &lt;+110&gt;:    mov    -0xc(%ebp),%eax
+   0x0804959e &lt;+113&gt;:    leave  
+   0x0804959f &lt;+114&gt;:    ret  </nread+34></exit@plt></nread+90></read@plt></nread+102></code></pre>
+
+<p>函数利用了0x8(%ebp),0xc(%ebp),0x10(%ebp)也就是e,f,g三处的值作为参数，最终效果是通过nread往bss地址处写入了size为100的数据; <br>
+同时可以看到开头的<code>push %ebp | mov %esp,%ebp</code>和结尾的<code>leave | ret</code>保持了栈桢的平衡，并开始执行d; <br>
+d处又一个<code>leave | ret</code>这个可以理解为在ebp处开始构造新的栈桢，执行完毕后，ebp=&amp;bss，esp=&amp;bss+8，并执行&amp;bss+4处的代码； <br>
+由于此题中bss段是可执行的，可以做任何事了，例如通过execve唤起一个shell。  </p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "fake_frame.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
