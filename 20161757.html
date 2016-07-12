@@ -94,7 +94,7 @@
 	
 这里主要注意从`load_machfile`到`exec_handle_sugid`：  
 `load_machfile`会处理mach文件的签名校验、然后申请新的内存空间存放新的程序代码，最后执行`swap_task_map`，更新当前任务的`vm_map`指针。  
-exec_handle_sugid则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  
+`exec_handle_sugid`则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  
 
 所以竞争条件出现的窗口在于，执行`swap_task_map`之后，执行`exec_handle_sugid`之前，具有写权限的端口可以往新的vm_map中写入任意的数据，达到改变新的程序的目的；  
 如果新的程序本身是一个suid程序，那么我们写入的数据也会以root权限来执行。  
@@ -248,7 +248,7 @@ if (error) {
 
 <p>这里主要注意从<code>load_machfile</code>到<code>exec_handle_sugid</code>： <br>
 <code>load_machfile</code>会处理mach文件的签名校验、然后申请新的内存空间存放新的程序代码，最后执行<code>swap_task_map</code>，更新当前任务的<code>vm_map</code>指针。 <br>
-exec<em>handle</em>sugid则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  </p>
+<code>exec_handle_sugid</code>则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  </p>
 
 <p>所以竞争条件出现的窗口在于，执行<code>swap_task_map</code>之后，执行<code>exec_handle_sugid</code>之前，具有写权限的端口可以往新的vm_map中写入任意的数据，达到改变新的程序的目的； <br>
 如果新的程序本身是一个suid程序，那么我们写入的数据也会以root权限来执行。  </p>
