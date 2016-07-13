@@ -168,7 +168,7 @@ def patch_in_shellcode(original_bytes, entrypoint, target_to_exec):
 1. 下载正版ipa然后砸壳(否则之后重新签名的ipa将不可用)，或者直接下载越狱版本的ipa。  
 2. 二进制在XXX.ipa/Payload/XXX.app/XXX。  
 3. 编写hook代码，可选用captainHook这个框架的模版,编译成dylib。  
-4. yololib， 帮助在二进制中插入LC_LOAD_DYLIB字段。  
+4. yololib， 帮助在二进制中插入`LC_LOAD_DYLIB`字段。  
 5. codesign -f -s [Cert Name] [Bin Name]签名dylibm(这里的证书需要是distribution类型的)。  
 6. xcrun -sdk iphoneos PackageApplication -v [App Name] -o [ipa Name]把app 打包成ipa。  
 7. sigh resign [ipa］[Cert] [Provising Profile] 重新对整个app进行签名(这里替换成provising profile对应bundle id，provising profile本身应该是ad hoc类型的，否则无法安装到设备上)。  
@@ -325,7 +325,7 @@ def patch<em>in</em>shellcode(original<em>bytes, entrypoint, target</em>to<em>ex
 1. 下载正版ipa然后砸壳(否则之后重新签名的ipa将不可用)，或者直接下载越狱版本的ipa。 <br>
 2. 二进制在XXX.ipa/Payload/XXX.app/XXX。 <br>
 3. 编写hook代码，可选用captainHook这个框架的模版,编译成dylib。 <br>
-4. yololib， 帮助在二进制中插入LC<em>LOAD</em>DYLIB字段。 <br>
+4. yololib， 帮助在二进制中插入<code>LC_LOAD_DYLIB</code>字段。 <br>
 5. codesign -f -s [Cert Name] [Bin Name]签名dylibm(这里的证书需要是distribution类型的)。 <br>
 6. xcrun -sdk iphoneos PackageApplication -v [App Name] -o [ipa Name]把app 打包成ipa。 <br>
 7. sigh resign [ipa］[Cert] [Provising Profile] 重新对整个app进行签名(这里替换成provising profile对应bundle id，provising profile本身应该是ad hoc类型的，否则无法安装到设备上)。 <br>
