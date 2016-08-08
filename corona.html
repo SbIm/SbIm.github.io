@@ -30,7 +30,7 @@
 注入点：利用afc的软链接和文件备份；修改racoon.config。有意思的是，这个软链接bug被修复后，在iOS6的越狱中文件备份的软链接bug又被利用了。  
   
 用户态：  
-racoon守护进程读取config文件时，可以在isakmp_cfg_config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4_index 和 nbns4_index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置；  
+racoon守护进程读取config文件时，可以在`isakmp_cfg_config`这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到`dns4_index` 和 `nbns4_index` 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置；  
 这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存；  
 iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload；  
 payload的目的，一个是计算dyld shared cache的偏移以及获取更多的gadgets；另一个是执行内核攻击；  
@@ -47,7 +47,7 @@ payload的目的，一个是计算dyld shared cache的偏移以及获取更多�
 <p>注入点：利用afc的软链接和文件备份；修改racoon.config。有意思的是，这个软链接bug被修复后，在iOS6的越狱中文件备份的软链接bug又被利用了。  </p>
 
 <p>用户态： <br>
-racoon守护进程读取config文件时，可以在isakmp<em>cfg</em>config这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到dns4<em>index 和 nbns4</em>index 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置； <br>
+racoon守护进程读取config文件时，可以在<code>isakmp_cfg_config</code>这个对象内部发生溢出，使配置文件中的dns、wins地址能够溢出写入到<code>dns4_index</code> 和 <code>nbns4_index</code> 变量里；进而可以控制下一个dns4语句，可以把dns里的地址写入index偏移的位置； <br>
 这样就可以在racoon守护进程的地址空间里，复写任意的可写页，也就可以把rop payload写入内存； <br>
 iOS5上，ASLR只有00～ff种偏移量，通过暴力破解，可以找到pc；接下来复写pc就可以执行的payload； <br>
 payload的目的，一个是计算dyld shared cache的偏移以及获取更多的gadgets；另一个是执行内核攻击；  </p>
