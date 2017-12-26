@@ -1,0 +1,1160 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="Keywords" content="blog"/>
+    <meta name="Description" content="blog"/>
+    <title>Simple</title>
+    <link rel="shortcut icon" href="/static/favicon.png"/>
+    <link rel="stylesheet" type="text/css" href="/main.css" />
+</head>
+<body>
+<div class="main">
+    <div class="header">
+    	<ul id="pages">
+            <li><a href="/">home</a></li>
+            <li><a href="/#/tags">tags</a></li>
+            <li><a href="/#/archive">archive</a></li>
+    	</ul>
+    </div>
+	<div class="wrap-header">
+	<h1>
+    <a href="/" id="title"></a>
+	</h1>
+	</div>
+<div id="md" style="display: none;">
+<!-- markdown -->
+# iOS内核上的堆特性和堆利用
+在iOS系统上，从一个内核堆内存破坏漏洞，到内核信息泄漏，甚至任意代码执行，往往需要利用堆喷射或者堆风水等技术，在内核中控制堆的分配来达到目的。    
+
+本文将介绍iOS 5～iOS 10这一系列操作系统上的内核堆特性，然后进一步分析其利用方式。  
+
+##堆喷射和堆风水
+列举两个常见的漏洞场景：  
+
+假设在某个堆地址上的内存块释放后，这个地址的指针没有置空并可能被继续使用的话，就造成了一个UAF漏洞。如果进一步我们有能力控制堆分配/释放，重新在这个地址上分配内存并写入恶意数据，就可以针对这个UAF漏洞进行利用；  
+假设在某个地址上的堆块存在溢出漏洞，如果我们有能力控制堆分配/释放，分配两个相邻的内存块，并且就可能通过溢出第一个堆块，在第二个堆块中写入恶意数据。
+
+而堆喷射和堆风水都是用来控制内核上堆布局的技术。要想在内核中进行堆喷射或者堆风水，需要拥有在内核空间中进行堆控制的权限。  
+
+堆喷射比较粗暴，只需要有`alloc`权限即可，把恶意数据大量重复地分配到内存空间中，并期望下次进行使用或者释放等操作的时候，能命中的恶意数据。这种方法相对简单，也更加不稳定。  
+
+堆风水则更为稳定也要求更高，它同时需要`alloc`和 `dealloc`两种权限，通过内核堆在`alloc`和`dealloc`时的规律，达到稳定控制堆的目的。
+
+##Mach Zone, kalloc && Malloc
+###Mach Zone
+Zone的概念相当于Linux的内存缓存，用于快速分配和释放频繁使用的固定大小的对象。它的API只能在内核态使用。内核引导时，会初始化一片内存区域放置"zones"，`zone_init`会从内核引导参数接受一个默认的参数，设置"zones"区域的大小，默认值为maxmem的1/4，即物理内存大小的1/4。  
+在xnu-3248.60.10(相当于10.11.6版本的OS X系统)中，它的结构如下：
+
+```
+struct zone {
+	struct zone_free_element *free_elements;	/* free elements directly linked */
+	struct {
+		queue_head_t			any_free_foreign;	/* foreign pages crammed into zone */
+		queue_head_t			all_free;
+		queue_head_t			intermediate;
+		queue_head_t			all_used;
+	} pages;		/* list of zone_page_metadata structs, which maintain per-page free element lists */
+	int		count;		/* Number of elements used now */
+	int		countfree;	/* Number of free elements */
+	lck_attr_t      lock_attr;	/* zone lock attribute */
+	decl_lck_mtx_data(,lock)	/* zone lock */
+	lck_mtx_ext_t   lock_ext;	/* placeholder for indirect mutex */
+	vm_size_t	cur_size;	/* current memory utilization */
+	vm_size_t	max_size;	/* how large can this zone grow */
+	vm_size_t	elem_size;	/* size of an element */
+	vm_size_t	alloc_size;	/* size used for more memory */
+	uint64_t	page_count __attribute__((aligned(8)));   /* number of pages used by this zone */
+	uint64_t	sum_count;	/* count of allocs (life of zone) */
+	uint32_t
+	/* boolean_t */ exhaustible        :1,	/* (F) merely return if empty? */
+	/* boolean_t */	collectable        :1,	/* (F) garbage collect empty pages */
+	/* boolean_t */	expandable         :1,	/* (T) expand zone (with message)? */
+	/* boolean_t */ allows_foreign     :1,  /* (F) allow non-zalloc space */
+	/* boolean_t */	doing_alloc_without_vm_priv:1,	/* is zone expanding now via a non-vm_privileged thread? */
+	/* boolean_t */ doing_alloc_with_vm_priv:1, /* is zone expanding now via a vm_privileged thread? */
+	/* boolean_t */	waiting            :1,	/* is thread waiting for expansion? */
+	/* boolean_t */	async_pending      :1,	/* asynchronous allocation pending? */
+	/* boolean_t */ zleak_on           :1,	/* Are we collecting allocation information? */
+	/* boolean_t */	caller_acct        :1,  /* do we account allocation/free to the caller? */  
+	/* boolean_t */	doing_gc           :1,	/* garbage collect in progress? */
+	/* boolean_t */ noencrypt          :1,
+	/* boolean_t */	no_callout         :1,
+	/* boolean_t */	async_prio_refill  :1,
+	/* boolean_t */	gzalloc_exempt     :1,
+	/* boolean_t */	alignment_required :1,
+	/* boolean_t */	use_page_list 	   :1,
+	/* future    */ _reserved          :15;
+
+	int		index;		/* index into zone_info arrays for this zone */
+	struct zone	*next_zone;	/* Link for all-zones list */
+	const char	*zone_name;	/* a name for the zone */
+#if	ZONE_DEBUG
+	queue_head_t	active_zones;	/* active elements */
+#endif	/* ZONE_DEBUG */
+
+#if CONFIG_ZLEAKS
+	uint32_t zleak_capture;		/* per-zone counter for capturing every N allocations */
+#endif /* CONFIG_ZLEAKS */
+	uint32_t zp_count;              /* counter for poisoning every N frees */
+	vm_size_t	prio_refill_watermark;
+	thread_t	zone_replenish_thread;
+#if	CONFIG_GZALLOC
+	gzalloc_data_t	gz;
+#endif /* CONFIG_GZALLOC */
+};
+```
+
+在osfmk/kern/zalloc.c文件中，可以看到用来操作zone的一些函数：  
+
+```
+void *zalloc(zone_t zone);//在zone中分配一个元素
+void zfree(zone_t zone, void *elem);//释放elem指向的元素;
+zone_t zinit(vm_size_t	 size, vm_size_t	max, vm_size_t alloc, const char *name); 
+//用来初始化一个zone，这里代表初始化一个名为name，元素为size字节大小、最大内存为max的zone，当它的内存满了之后，会额外分配alloc个字节。这些参数都可以在zone的结构体里面看到。
+```
+可以看出zone有一个重要的特性就是，同一个zone的内，所有的元素大小都是相同的。分配或释放都无需指定size大小。在OS X或者越狱的iOS设备上，用`zprint`工具打印出当前内核中的zone列表，可以看到一个个大小不同的zone。当分配一块内存的时候，会选择能满足所需求size的`elem_size`最小的zone来进行分配。  
+###kalloc && Malloc
+如果要进行动态长度内存的分配，则需要用到另外两个接口：  
+
+`kalloc(size)/kfree(ptr, size)`，使用`kalloc()`进行小块内存的分配，会在内部调用`zalloc()`;当分配较大块内存，则会用`kmem_alloc()`。他们在底层都使用`kernel_memory_allocate()`进行内存分配  
+
+`Malloc(size)/FREE(ptr)`，`Malloc()`是`kalloc()`的封装，不同的是所分配的element都会在其块首记录下其size，这样在释放的时候，无需指定size大小，也无需在释放之前记录size。
+
+##iOS 5
+###特性
+iOS5 上的zone结构相比现在要稍简单一些：
+
+```
+struct zone {
+ int count; /* Number of elements used now */
+ vm_offset_t free_elements;
+ decl_lck_mtx_data(,lock) /* zone lock */
+ lck_mtx_ext_t lock_ext; /* placeholder for indirect mutex */
+ lck_attr_t lock_attr; /* zone lock attribute */
+ lck_grp_t lock_grp; /* zone lock group */
+ lck_grp_attr_t lock_grp_attr; /* zone lock group attribute */
+ vm_size_t cur_size; /* current memory utilization */
+ vm_size_t max_size; /* how large can this zone grow */
+ vm_size_t elem_size; /* size of an element */
+ vm_size_t alloc_size; /* size used for more memory */
+ uint64_t sum_count; /* count of allocs (life of zone) */
+ unsigned int
+ /* boolean_t */ exhaustible :1, /* (F) merely return if empty? */
+ /* boolean_t */ collectable :1, /* (F) garbage collect empty pages */
+ /* boolean_t */ expandable :1, /* (T) expand zone (with message)? */
+ /* boolean_t */ allows_foreign :1,/* (F) allow non-zalloc space */
+ /* boolean_t */ doing_alloc :1, /* is zone expanding now? */
+ /* boolean_t */ waiting :1, /* is thread waiting for expansion? */
+ /* boolean_t */ async_pending :1, /* asynchronous allocation pending? */
+ /* boolean_t */ caller_acct: 1, /* do we account allocation/free to the caller? */
+ /* boolean_t */ doing_gc :1, /* garbage collect in progress? */
+ /* boolean_t */ noencrypt :1,
+ /* boolean_t */ no_callout:1,
+ /* boolean_t */ async_prio_refill:1;
+ int index; /* index into zone_info arrays for this zone */
+ struct zone * next_zone; /* Link for all-zones list */
+ call_entry_data_t call_async_alloc; /* callout for asynchronous alloc */
+ const char *zone_name; /* a name for the zone */
+ vm_size_t prio_refill_watermark;
+ thread_t zone_replenish_thread;
+};
+```
+每个zone中都会有的一个单向链接的后进先出链表，类似其他系统上的`空表`，`free_element`指向这个表的表头。表里记录这个zone里的空闲块元素。  
+每次释放的时候，会把释放的元素插入`free_elements`所指向的表头；而分配则自表头开始从`freelist`上取元素下来使用。  
+当`freelist`为空，则会重新为这个zone分配`alloc_size`(通常是内存页大小)的内存，并根据`elem_size`，把内存分成相同大小的块依次链入空表。  
+###利用
+* 由于`freelist`后进先出，以及新分配的内存页被依次链入`freelist`等特性，规律相对比较简单。这时候，可以通过`NDRV sockets`或者`OSUnserializeXML`等方式获取内核堆的分配/释放权限，达到控制内核堆的目的。  
+
+* 如果拿到堆内存破坏漏洞并能够较稳定地控制内核堆，这时候可以考虑的攻击目标有：  
+1 . 破坏`freelist`中元素指向的下一个元素的指针，在这个元素被分配后，被破坏的指针被赋给`free_elements`，下一次分配会在我们控制的任意地址，并可以任意向里面写入数据。  
+2 . 破坏`Malloc()`所分配的元素的`size field`.这样有可能使这个元素被释放到一个`elem_size`更大的zone里面，这个元素下一次被分配时，可以被允许写入比实际size更大的数据，造成堆溢出。  
+3 . 破坏C++对象数据。内核中实现了一个C++运行时库的子集给IOKit使用，同时这也给内核带来了更多的攻击对象。OSObject是这个库里所有类的基类。一个OSObject在堆中存储着`vtable ptr`、`retainCount`以及对象属性等数据。修改`vtable ptr`可以劫持对象的虚方法调用控制程序执行流；修改`rerainCount`可能造成对象提前释放或者无法释放；修改对象属性例如指向某个数据的指针可能造成在随后的使用中通过这个指针泄露内核数据等。  
+
+##iOS 6
+###特性
+* 由于KASLR，`zones`的起始地址现在是随机的。
+* 释放堆块的时候，如果是较小的堆块(大小由cpu决定：`cpu_info.cache_line_size`)，会对这个堆块进行污染处理，向堆块数据区中写入重复的`0xdeadbeef`，并且在分配堆块的时候做`0xdeadbeef`校验，如果没有通过，直接`panic()`。所以无法在这些堆块释放后修改里面的数据。
+* 内核会生成两个随机的cookie:`zp_noposion_cookie`和`zp_posioned_cookie`，分别用于污染堆块和非污染堆块。把它和每个堆块的"next_ptr"做异或运算写入堆块的末尾。分配堆块的时候，会检查这个异或数据的合法性。这样子就无法通过溢出漏洞来修改相邻`free_element`元素的`next_ptr`指针。同时，分配之后会在原来保存`next_ptr`的头部和`cookie^ptr`的尾部，写入`0xdeadbeef`，避免了信息泄漏。 
+
+###利用
+* 之前的控制内核堆的方法都仍然能继续使用。  
+值得一提的是iOS 6引入的新的数据结构`vm_map_copy_t`，带有一个指向data区的内核指针、一个控制其指向的data区大小的`size field`，内核指针返回给用户空间很容易造成任意内核信息泄漏，同时它的size避开了内核堆块的"释放时污染"策略。非常方便进行堆布局和攻击，成为了新的攻击对象。  
+
+* 攻击目标方面，由于`cookie`保护，除非攻击者能够从泄漏出cookie信息，之前的`freelist`已经较难使用。
+
+##iOS 7
+###特性
+**1.大块的堆内存在释放时也有可能被污染了**。可以看到zone的结构体中加了一个重要的字段`uint32_t zp_count;`。在zone内部的每N次释放，都会进行一次`element posion`，从下面的代码中可以看到其流程：
+
+```
+boolean_t poison = FALSE;
+
+/* Always poison tiny zones' elements (limit is 0 if -no-zp is set) */
+if (zone->elem_size <= zp_tiny_zone_limit)
+{
+ poison = TRUE;
+}
+else if (zp_factor != 0 && ++zone->zp_count >= zp_factor) 
+{
+ /* Poison zone elements periodically */
+ zone->zp_count = 0;
+ poison = TRUE;
+}
+
+if (poison) 
+{
+ vm_offset_t *element_cursor = primary + 1;
+
+ for ( ; element_cursor < backup; element_cursor++)
+ {
+  *element_cursor = ZP_POISON;
+ }
+}
+```
+如果zone的`elem_size`小于`cpu_info.cache_line_size`,或者是`zp_count`自增之后大于`zp_factor`都会进行posion处理。而这个  `zp_factor`其实以前一直存在，是一个调试用的特性，启动时会按概率随机地设置成15(25%), 16(50%), 17(25%)三个值。  
+
+**2.zone引入了新的内存管理方法**。可以看到最上面的zone结构相比iOS 5的zone结构新增了`pages`这个字段。
+
+```
+struct {
+	queue_head_t			any_free_foreign;	/* foreign pages crammed into zone */
+	queue_head_t			all_free;
+	queue_head_t			intermediate;
+	queue_head_t			all_used;
+} pages;		/* list of zone_page_metadata structs, which maintain per-page free element lists */
+```
+依次代表zone外部的内存页(少部分zone允许使用)、全部空闲的内存页、部分使用的内存用、没有空闲块的内存页。这四种内存页面组成4个双向链表，链表上的每个元素代表zone上的一个内存页面的`page_meta_data`。而`pages`里的4个元素就是指向这些链表的头部。而`page_meta_data`的结构则是:
+
+```
+struct zone_page_metadata {
+	queue_chain_t				pages;		//含有metadata的前向指针和后向指针
+	struct zone_free_element	*elements;    //页内的freelist
+	zone_t						zone;		//指向zone的指针
+	uint16_t					alloc_count;	//页内最大元素数量
+	uint16_t					free_count;	//freelist上元素数量
+};
+```
+对于这种带有`zone_page_metadata`的zone，原来的`free_elements`字段已经没有任何意义，`freelist`改为基于page来进行管理。在分配和释放的过程中，根据内存使用情况始终保证在page正确的`page queue`里面。  
+因为每个page增加了一个`metadata`，为了合理的利用内存，并不是所有的zone都使用了这个新的`zone_page_metadata`。可以在zone结构中找到`use_page_list`这个比特位，来判断是什么类型的zone。而内核设置这个比特位的方法，则是根据`elem_size`通过评估浪费的内存是否是可以接受的。
+
+```
+/*
+ * Opt into page list tracking if we can reliably map an allocation
+ * to its page_metadata, and if the wastage in the tail of
+ * the allocation is not too large
+ */
+if (alloc == PAGE_SIZE) {
+ if ((PAGE_SIZE % size) >= sizeof(struct zone_page_metadata)) {
+  use_page_list = TRUE;
+ } else if ((PAGE_SIZE - sizeof(struct zone_page_metadata)) % size <= PAGE_SIZE / 100) {
+  use_page_list = TRUE;
+ }
+}
+```  
+这样的新结构带来的最大好处就是垃圾回收变得更加简单了，只需要回收`all_free`队列里面的内存页即可。  
+对于安全来说，就是现在可以通过element来反查`zone`，进而确定一个element是否因内存破坏而被释放到了错误的zone里面造成安全隐患(可惜内核有做这个检测但是并没有抛出错误而是直接忽略掉)。
+
+###利用
+* 一切的利用方式和以前一样。  
+* 对攻击来说，就是`page_list`特性引入了新的攻击点：经典的双向链表"DWORD SHOOT"攻击。  
+从`page_list`队列中，取出或插入元素时，没有校验前向指针或者后向指针的合法性。
+
+```
+static __inline__ void
+remqueue(
+         queue_entry_t elt)
+{
+ elt->next->prev = elt->prev;
+ elt->prev->next = elt->next;
+ __DEQUEUE_ELT_CLEANUP(elt);
+}
+```
+
+##iOS 8
+###特性 
+**1.为之前的"DWORD SHOOT"攻击增加了"safe unlink"保护**
+
+```
+static __inline__ void
+remqueue(
+	queue_entry_t	elt)
+{
+	queue_entry_t	next_elt, prev_elt;
+
+	__QUEUE_ELT_VALIDATE(elt);
+	next_elt = elt->next;
+	prev_elt = elt->prev; /* next_elt may equal prev_elt (and the queue head) if elt was the only element */
+	next_elt->prev = prev_elt;
+	prev_elt->next = next_elt;
+	__DEQUEUE_ELT_CLEANUP(elt);
+}
+```
+**2.减少了大块元素的污染概率**。污染大块元素是一个比较耗性能的操作，所以现在根据`elem_size`以及一个`zp_scale`参数计算出新的污染频率`uint32_t sample_factor = zp_factor + (((uint32_t)inner_size) >> zp_scale);`.
+
+###利用
+* 一切的利用方式和以前一样。  
+* 由于`safe unlink`特性的引入，攻击`page_list`的双向链表不再有效。
+
+##iOS 9
+###特性
+* 对`vm_map_copy_t`加强校验。`vm_map_copy_t`移除了结构体中的指向data的指针,因为data实际上就在header后面，这个指针会导致内核任意信息泄漏风险；同时移除了原来用来表示整个堆块大小的`kalloc_size`字段，这是一个无用字段，因为`kalloc_size`实际上就是"buffer"大小和`vm_map_copy_t`大小之和。  
+
+* freelist按照随机顺序进行初始化。从iOS 9.2开始，新分配内存时，每次添加内存进入`free_elements`的顺序已经不是线性地从一页的开始到结束。而是随机的决定，是添加当前的第一个元素还是当前的最后一个元素。
+###利用 
+* "freelist"的随机初始化增加的控制堆的难度，我们无法预测某个序列的堆块在一页内存中的具体位置。但控制堆的方法依然不变。仍有很大概率通过堆风水在新初始化的内存中得到两个相邻的堆块，并且新初始化的一页内存的最后两个堆块总是相邻的。  
+
+* 攻击目标方面，通过overwrite`vm_map_copy_t `结构的`size`字段，仍然可以造成信息泄漏，但是这个信息泄漏已经被硬编码写死限制在4k大小。  
+
+##iOS 10
+
+###特性
+* 对overwrite `vm_map_copy_t`结构的`size`字段做了更多检查;  
+
+* 存储所有zone信息的数组`zone_array`被放在了内核空间的bss段(之前存放在堆里面)，即一个可以通过内核基址和偏移计算出来的地址；
+
+```
+/*
+	source code from  xnu-3789.1.32(iOS 10)
+*/
+
+//zalloc.c
+...
+zone_t zinit(
+	vm_size_t	size,		/* the size of an element */
+	vm_size_t	max,		/* maximum memory to use */
+	vm_size_t	alloc,		/* allocation size */
+	const char	*name)		/* a name for the zone */
+{
+	zone_t		z;
+	boolean_t	use_page_list = FALSE;
+
+	if (zone_zone == ZONE_NULL) {
+
+		z = (struct zone *)zdata;
+		/* special handling in zcram() because the first element is being used */
+	} else
+		z = (zone_t) zalloc(zone_zone);	//从堆上分配内存
+...
+
+
+/*
+	source code from  xnu-3248.60.10(prior to iOS 10)
+*/
+
+//zalloc.h 
+...
+extern struct zone zone_array[];	//一个未初始化的全局变量，装载时将在内存空间中被放在bss段
+...
+
+//zalloc.c
+...
+#define MAX_ZONES       256
+struct zone             zone_array[MAX_ZONES];
+...
+...
+...
+zone_t zinit(
+	vm_size_t	size,		/* the size of an element */
+	vm_size_t	max,		/* maximum memory to use */
+	vm_size_t	alloc,		/* allocation size */
+	const char	*name)		/* a name for the zone */
+{
+	zone_t		z;
+
+	simple_lock(&all_zones_lock);
+	z = &(zone_array[zone_array_index]);	//初始化的zone的地址在zone_array
+	zone_array_index++;
+	...
+}
+```  
+* 现在所有的zone都使用了`page_meta_data`(之前因内存浪费问题仅部分使用)，解决之前浪费内存的方式是，不再把`meta_data`放到内存页里，而是把所有的放到每个zone的`zone_map`的开头，专门分配了一段空间名为`zone_metadata_region`来存储这些信息。 
+
+```
+/*
+	source code from  xnu-3789.1.32(iOS 10)
+*/
+//zalloc.h
+struct zone {
+...
+	uint32_t
+	/* boolean_t */ exhaustible        :1,	/* (F) merely return if empty? */
+	/* boolean_t */	collectable        :1,	/* (F) garbage collect empty pages */
+	/* boolean_t */	expandable         :1,	/* (T) expand zone (with message)? */
+	/* boolean_t */ allows_foreign     :1,  /* (F) allow non-zalloc space */
+	/* boolean_t */	doing_alloc_without_vm_priv:1,	/* is zone expanding now via a non-vm_privileged thread? */
+	/* boolean_t */ doing_alloc_with_vm_priv:1, /* is zone expanding now via a vm_privileged thread? */
+	/* boolean_t */	waiting            :1,	/* is thread waiting for expansion? */
+	/* boolean_t */	async_pending      :1,	/* asynchronous allocation pending? */
+	/* boolean_t */ zleak_on           :1,	/* Are we collecting allocation information? */
+	/* boolean_t */	caller_acct        :1,  /* do we account allocation/free to the caller? */  
+	/* boolean_t */ noencrypt          :1,
+	/* boolean_t */	no_callout         :1,
+	/* boolean_t */	async_prio_refill  :1,
+	/* boolean_t */	gzalloc_exempt     :1,
+	/* boolean_t */	alignment_required :1,
+	/* boolean_t */ zone_logging	   :1,	/* Enable zone logging for this zone. */
+	/* boolean_t */ zone_replenishing  :1,
+	/* future    */ _reserved          :15;
+	
+	/*可以看到之前用来判断是否使用page_list的比特位
+		/* boolean_t */	use_page_list 	   :1,
+	已经移除
+	*/
+...
+}
+
+//zalloc.c
+void
+zone_init(...)
+{
+...
+	zone_map_min_address = zone_min;
+	zone_map_max_address = zone_max;
+	
+	zone_pages = (unsigned int)atop_kernel(zone_max - zone_min);
+	zone_metadata_space = round_page(zone_pages * sizeof(struct zone_page_metadata));
+	
+	//zone_init里面为zone_metadata_region分配空间
+	retval = kernel_memory_allocate(zone_map, &zone_metadata_region_min, zone_metadata_space,
+					0, KMA_KOBJECT | KMA_VAONLY | KMA_PERMANENT, VM_KERN_MEMORY_OSFMK);
+...
+}
+``` 
+
+* `page_meta_data`结构体所做的改动，则是移除了两个指针，减轻了内核信息泄漏的风险。一个是指向对应的zone的指针，因为现在zone结构的位置固定，通过一个`zindex`表示zone序列；一个是指向"freelist"的指针，改为用一个`freelist_offset`表示第一个free元素相对于当前内存页的偏移位置。   
+对于`alloc_size`大于一个`PAGE_SIZE`的zone，那些超出一页内存的内存页，`page_meta_data`和常规的又有些不一样，这种内存页的"metadata"只有两个比较有意义的字段：`zindex=0xFF`，用来表示这是一个"次要"的metadata；`real_metadata_offset`，用来表示此页的metadata相对于第一页的metadata的偏移。
+
+```
+struct zone_page_metadata {
+	queue_chain_t 		pages;
+	
+	//freelist_offset or real_metadata_offset
+	union {
+		uint32_t 		freelist_offset;
+		uint32_t 		real_metadata_offset; 
+	};
+	
+	uint16_t			free_count;
+	uint8_t 			zindex;		
+	uint8_t 			page_count; 
+};
+...
+...
+static inline struct zone_page_metadata *
+get_zone_page_metadata(struct zone_free_element *element, boolean_t init)
+{
+	struct zone_page_metadata *page_meta = 0;
+
+	if (from_zone_map(element, sizeof(struct zone_free_element))) {	
+		page_meta = (struct zone_page_metadata *)(PAGE_METADATA_FOR_ELEMENT(element));
+		if (init)
+			zone_populate_metadata_page(page_meta);
+	} else {
+		page_meta = (struct zone_page_metadata *)(trunc_page((vm_offset_t)element));
+	}
+	if (init)
+		bzero((char *)page_meta, sizeof(struct zone_page_metadata));
+		
+	//判断zindex是否是MULTIPAGE_METADATA_MAGIC，如果是，则通过real_metadata_offset找到真正的page_metadata
+	return ((PAGE_METADATA_GET_ZINDEX(page_meta) != MULTIPAGE_METADATA_MAGIC) ? page_meta : page_metadata_get_realmeta(page_meta));
+}
+```
+  
+* 同时，由于所有的zone都使用了`page_meta_data`，现在所有的堆块都有办法确认自己在哪个zone里面，不需要再去存储堆块的size值了。这样，之前使用`MALLOC()`等带size字段分配内核内存的方法也可能可以被用来做内核堆布局。因为在之前的`MALLOC()`中，size字段会被认为是OSOBject的`vtable ptr`，给利用造成困难。  
+之前的iOS版本上常用的，把一个堆块元素释放到错误的zone，并且在随后的分配中造成溢出的利用方式，也已经完全失效，内核现在可以检测到这种行为并且直接产生`panic()`。
+
+```
+/*
+	source code from  xnu-3789.1.32(iOS 10)
+*/
+void *
+__MALLOC(
+	size_t		size,
+	int		type,
+	int		flags,
+	vm_allocation_site_t *site)
+{
+	void 	*addr = NULL;
+	vm_size_t 	msize = size;
+...
+}
+
+/*
+	source code from  xnu-3248.60.10(prior to iOS 10)
+*/
+void *
+__MALLOC(
+	size_t		size,
+	int		type,
+	int		flags,
+	vm_allocation_site_t *site)
+{
+	struct _mhead	*hdr = NULL;
+	size_t		memsize = sizeof (*hdr) + size; //带有一个header
+...
+}
+```
+
+* `freelist`空表中，每个元素指向下一个元素的指针`next_ptr`变成了`ptr^cookie`，这个改变不影响空表的使用，但是降低了内核指针泄漏的风险。更重要的是，在块首存储`next_ptr`是非常危险的。如果存在一个类型混淆漏洞把freelist中的元素当作OSObject来处理，就会把`next_ptr`当作是它的`vtable ptr`，而我们控制了`next_ptr`里的数据，也就控制了vtable。
+
+```
+static inline void
+free_to_zone(zone_t      zone,
+             vm_offset_t element,
+             boolean_t   poison)
+{
+	...
+	...
+	vm_offset_t *primary  = (vm_offset_t *) element;
+	vm_offset_t *backup   = get_backup_ptr(zone->elem_size, primary);
+	...
+	old_head = (vm_offset_t)page_metadata_get_freelist(page_meta);
+	...
+
+	*backup = old_head ^ (poison ? zp_poisoned_cookie : zp_nopoison_cookie);
+
+	//堆块首地址处，即old_head内存储着下一个free element的地址，把它和zp_nopoison_cookie做异或运算
+	*primary             = old_head ^ zp_nopoison_cookie;
+	page_metadata_set_freelist(page_meta, (struct zone_free_element *)element);
+	...
+	...
+}
+```
+
+###利用
+* 之前的堆布局方法依然有效。  
+有所变化的是，由于去掉了`size field`，使用MALLOC()分配的内存现在也可以进行堆风水/堆喷射了。  
+
+* 攻击目标的话，如上面第五点所说，修改`size field`导致free进入错误的zone这种方法已经不可用；  
+Stefen Esser在其ppt中隐晦地提到了`mach port`可能会成为新的攻击目标，而在最近10月份，Ian Beer发了一篇[task_t considered harmful](https://googleprojectzero.blogspot.hk/)讲述了攻击mach port的方式.
+
+##Ref
+1.Stefan Esser, [iOS 10 - Kernel Heap Revisited](http://gsec.hitb.org/materials/sg2016/D2%20-%20Stefan%20Esser%20-%20iOS%2010%20Kernel%20Heap%20Revisited.pdf).  
+2.Tarjei Mandt, [Attacking Zone Page Metadata in iOS 7 and OS X Mavericks](http://blog.azimuthsecurity.com/2013/12/attacking-zone-page-metadata-in-ios-7.html).  
+3.Stefan Esser, [iOS Kernel Heap Armageddon](https://media.blackhat.com/bh-us-12/Briefings/Esser/BH_US_12_Esser_iOS_Kernel_Heap_Armageddon_WP.pdf).  
+<!-- markdown end -->
+</div>
+<div class="entry" id="main">
+<!-- content -->
+<h1 id="ios">iOS内核上的堆特性和堆利用</h1>
+
+<p>在iOS系统上，从一个内核堆内存破坏漏洞，到内核信息泄漏，甚至任意代码执行，往往需要利用堆喷射或者堆风水等技术，在内核中控制堆的分配来达到目的。    </p>
+
+<p>本文将介绍iOS 5～iOS 10这一系列操作系统上的内核堆特性，然后进一步分析其利用方式。  </p>
+
+<h2 id="">堆喷射和堆风水</h2>
+
+<p>列举两个常见的漏洞场景：  </p>
+
+<p>假设在某个堆地址上的内存块释放后，这个地址的指针没有置空并可能被继续使用的话，就造成了一个UAF漏洞。如果进一步我们有能力控制堆分配/释放，重新在这个地址上分配内存并写入恶意数据，就可以针对这个UAF漏洞进行利用； <br>
+假设在某个地址上的堆块存在溢出漏洞，如果我们有能力控制堆分配/释放，分配两个相邻的内存块，并且就可能通过溢出第一个堆块，在第二个堆块中写入恶意数据。</p>
+
+<p>而堆喷射和堆风水都是用来控制内核上堆布局的技术。要想在内核中进行堆喷射或者堆风水，需要拥有在内核空间中进行堆控制的权限。  </p>
+
+<p>堆喷射比较粗暴，只需要有<code>alloc</code>权限即可，把恶意数据大量重复地分配到内存空间中，并期望下次进行使用或者释放等操作的时候，能命中的恶意数据。这种方法相对简单，也更加不稳定。  </p>
+
+<p>堆风水则更为稳定也要求更高，它同时需要<code>alloc</code>和 <code>dealloc</code>两种权限，通过内核堆在<code>alloc</code>和<code>dealloc</code>时的规律，达到稳定控制堆的目的。</p>
+
+<h2 id="machzonekallocmalloc">Mach Zone, kalloc &amp;&amp; Malloc</h2>
+
+<h3 id="machzone">Mach Zone</h3>
+
+<p>Zone的概念相当于Linux的内存缓存，用于快速分配和释放频繁使用的固定大小的对象。它的API只能在内核态使用。内核引导时，会初始化一片内存区域放置"zones"，<code>zone_init</code>会从内核引导参数接受一个默认的参数，设置"zones"区域的大小，默认值为maxmem的1/4，即物理内存大小的1/4。 <br>
+在xnu-3248.60.10(相当于10.11.6版本的OS X系统)中，它的结构如下：</p>
+
+<pre><code>struct zone {
+    struct zone_free_element *free_elements;    /* free elements directly linked */
+    struct {
+        queue_head_t            any_free_foreign;   /* foreign pages crammed into zone */
+        queue_head_t            all_free;
+        queue_head_t            intermediate;
+        queue_head_t            all_used;
+    } pages;        /* list of zone_page_metadata structs, which maintain per-page free element lists */
+    int     count;      /* Number of elements used now */
+    int     countfree;  /* Number of free elements */
+    lck_attr_t      lock_attr;  /* zone lock attribute */
+    decl_lck_mtx_data(,lock)    /* zone lock */
+    lck_mtx_ext_t   lock_ext;   /* placeholder for indirect mutex */
+    vm_size_t   cur_size;   /* current memory utilization */
+    vm_size_t   max_size;   /* how large can this zone grow */
+    vm_size_t   elem_size;  /* size of an element */
+    vm_size_t   alloc_size; /* size used for more memory */
+    uint64_t    page_count __attribute__((aligned(8)));   /* number of pages used by this zone */
+    uint64_t    sum_count;  /* count of allocs (life of zone) */
+    uint32_t
+    /* boolean_t */ exhaustible        :1,  /* (F) merely return if empty? */
+    /* boolean_t */ collectable        :1,  /* (F) garbage collect empty pages */
+    /* boolean_t */ expandable         :1,  /* (T) expand zone (with message)? */
+    /* boolean_t */ allows_foreign     :1,  /* (F) allow non-zalloc space */
+    /* boolean_t */ doing_alloc_without_vm_priv:1,  /* is zone expanding now via a non-vm_privileged thread? */
+    /* boolean_t */ doing_alloc_with_vm_priv:1, /* is zone expanding now via a vm_privileged thread? */
+    /* boolean_t */ waiting            :1,  /* is thread waiting for expansion? */
+    /* boolean_t */ async_pending      :1,  /* asynchronous allocation pending? */
+    /* boolean_t */ zleak_on           :1,  /* Are we collecting allocation information? */
+    /* boolean_t */ caller_acct        :1,  /* do we account allocation/free to the caller? */  
+    /* boolean_t */ doing_gc           :1,  /* garbage collect in progress? */
+    /* boolean_t */ noencrypt          :1,
+    /* boolean_t */ no_callout         :1,
+    /* boolean_t */ async_prio_refill  :1,
+    /* boolean_t */ gzalloc_exempt     :1,
+    /* boolean_t */ alignment_required :1,
+    /* boolean_t */ use_page_list      :1,
+    /* future    */ _reserved          :15;
+
+    int     index;      /* index into zone_info arrays for this zone */
+    struct zone *next_zone; /* Link for all-zones list */
+    const char  *zone_name; /* a name for the zone */
+#if    ZONE_DEBUG
+    queue_head_t    active_zones;   /* active elements */
+#endif    /* ZONE_DEBUG */
+
+#if CONFIG_ZLEAKS
+    uint32_t zleak_capture;     /* per-zone counter for capturing every N allocations */
+#endif /* CONFIG_ZLEAKS */
+    uint32_t zp_count;              /* counter for poisoning every N frees */
+    vm_size_t   prio_refill_watermark;
+    thread_t    zone_replenish_thread;
+#if    CONFIG_GZALLOC
+    gzalloc_data_t  gz;
+#endif /* CONFIG_GZALLOC */
+};
+</code></pre>
+
+<p>在osfmk/kern/zalloc.c文件中，可以看到用来操作zone的一些函数：  </p>
+
+<pre><code>void *zalloc(zone_t zone);//在zone中分配一个元素
+void zfree(zone_t zone, void *elem);//释放elem指向的元素;
+zone_t zinit(vm_size_t     size, vm_size_t    max, vm_size_t alloc, const char *name); 
+//用来初始化一个zone，这里代表初始化一个名为name，元素为size字节大小、最大内存为max的zone，当它的内存满了之后，会额外分配alloc个字节。这些参数都可以在zone的结构体里面看到。
+</code></pre>
+
+<p>可以看出zone有一个重要的特性就是，同一个zone的内，所有的元素大小都是相同的。分配或释放都无需指定size大小。在OS X或者越狱的iOS设备上，用<code>zprint</code>工具打印出当前内核中的zone列表，可以看到一个个大小不同的zone。当分配一块内存的时候，会选择能满足所需求size的<code>elem_size</code>最小的zone来进行分配。  </p>
+
+<h3 id="kallocmalloc">kalloc &amp;&amp; Malloc</h3>
+
+<p>如果要进行动态长度内存的分配，则需要用到另外两个接口：  </p>
+
+<p><code>kalloc(size)/kfree(ptr, size)</code>，使用<code>kalloc()</code>进行小块内存的分配，会在内部调用<code>zalloc()</code>;当分配较大块内存，则会用<code>kmem_alloc()</code>。他们在底层都使用<code>kernel_memory_allocate()</code>进行内存分配  </p>
+
+<p><code>Malloc(size)/FREE(ptr)</code>，<code>Malloc()</code>是<code>kalloc()</code>的封装，不同的是所分配的element都会在其块首记录下其size，这样在释放的时候，无需指定size大小，也无需在释放之前记录size。</p>
+
+<h2 id="ios5">iOS 5</h2>
+
+<h3 id="">特性</h3>
+
+<p>iOS5 上的zone结构相比现在要稍简单一些：</p>
+
+<pre><code>struct zone {
+ int count; /* Number of elements used now */
+ vm_offset_t free_elements;
+ decl_lck_mtx_data(,lock) /* zone lock */
+ lck_mtx_ext_t lock_ext; /* placeholder for indirect mutex */
+ lck_attr_t lock_attr; /* zone lock attribute */
+ lck_grp_t lock_grp; /* zone lock group */
+ lck_grp_attr_t lock_grp_attr; /* zone lock group attribute */
+ vm_size_t cur_size; /* current memory utilization */
+ vm_size_t max_size; /* how large can this zone grow */
+ vm_size_t elem_size; /* size of an element */
+ vm_size_t alloc_size; /* size used for more memory */
+ uint64_t sum_count; /* count of allocs (life of zone) */
+ unsigned int
+ /* boolean_t */ exhaustible :1, /* (F) merely return if empty? */
+ /* boolean_t */ collectable :1, /* (F) garbage collect empty pages */
+ /* boolean_t */ expandable :1, /* (T) expand zone (with message)? */
+ /* boolean_t */ allows_foreign :1,/* (F) allow non-zalloc space */
+ /* boolean_t */ doing_alloc :1, /* is zone expanding now? */
+ /* boolean_t */ waiting :1, /* is thread waiting for expansion? */
+ /* boolean_t */ async_pending :1, /* asynchronous allocation pending? */
+ /* boolean_t */ caller_acct: 1, /* do we account allocation/free to the caller? */
+ /* boolean_t */ doing_gc :1, /* garbage collect in progress? */
+ /* boolean_t */ noencrypt :1,
+ /* boolean_t */ no_callout:1,
+ /* boolean_t */ async_prio_refill:1;
+ int index; /* index into zone_info arrays for this zone */
+ struct zone * next_zone; /* Link for all-zones list */
+ call_entry_data_t call_async_alloc; /* callout for asynchronous alloc */
+ const char *zone_name; /* a name for the zone */
+ vm_size_t prio_refill_watermark;
+ thread_t zone_replenish_thread;
+};
+</code></pre>
+
+<p>每个zone中都会有的一个单向链接的后进先出链表，类似其他系统上的<code>空表</code>，<code>free_element</code>指向这个表的表头。表里记录这个zone里的空闲块元素。 <br>
+每次释放的时候，会把释放的元素插入<code>free_elements</code>所指向的表头；而分配则自表头开始从<code>freelist</code>上取元素下来使用。 <br>
+当<code>freelist</code>为空，则会重新为这个zone分配<code>alloc_size</code>(通常是内存页大小)的内存，并根据<code>elem_size</code>，把内存分成相同大小的块依次链入空表。  </p>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li><p>由于<code>freelist</code>后进先出，以及新分配的内存页被依次链入<code>freelist</code>等特性，规律相对比较简单。这时候，可以通过<code>NDRV sockets</code>或者<code>OSUnserializeXML</code>等方式获取内核堆的分配/释放权限，达到控制内核堆的目的。  </p></li>
+<li><p>如果拿到堆内存破坏漏洞并能够较稳定地控制内核堆，这时候可以考虑的攻击目标有： <br>
+1 . 破坏<code>freelist</code>中元素指向的下一个元素的指针，在这个元素被分配后，被破坏的指针被赋给<code>free_elements</code>，下一次分配会在我们控制的任意地址，并可以任意向里面写入数据。 <br>
+2 . 破坏<code>Malloc()</code>所分配的元素的<code>size field</code>.这样有可能使这个元素被释放到一个<code>elem_size</code>更大的zone里面，这个元素下一次被分配时，可以被允许写入比实际size更大的数据，造成堆溢出。 <br>
+3 . 破坏C++对象数据。内核中实现了一个C++运行时库的子集给IOKit使用，同时这也给内核带来了更多的攻击对象。OSObject是这个库里所有类的基类。一个OSObject在堆中存储着<code>vtable ptr</code>、<code>retainCount</code>以及对象属性等数据。修改<code>vtable ptr</code>可以劫持对象的虚方法调用控制程序执行流；修改<code>rerainCount</code>可能造成对象提前释放或者无法释放；修改对象属性例如指向某个数据的指针可能造成在随后的使用中通过这个指针泄露内核数据等。  </p></li>
+</ul>
+
+<h2 id="ios6">iOS 6</h2>
+
+<h3 id="">特性</h3>
+
+<ul>
+<li>由于KASLR，<code>zones</code>的起始地址现在是随机的。</li>
+<li>释放堆块的时候，如果是较小的堆块(大小由cpu决定：<code>cpu_info.cache_line_size</code>)，会对这个堆块进行污染处理，向堆块数据区中写入重复的<code>0xdeadbeef</code>，并且在分配堆块的时候做<code>0xdeadbeef</code>校验，如果没有通过，直接<code>panic()</code>。所以无法在这些堆块释放后修改里面的数据。</li>
+<li>内核会生成两个随机的cookie:<code>zp_noposion_cookie</code>和<code>zp_posioned_cookie</code>，分别用于污染堆块和非污染堆块。把它和每个堆块的"next_ptr"做异或运算写入堆块的末尾。分配堆块的时候，会检查这个异或数据的合法性。这样子就无法通过溢出漏洞来修改相邻<code>free_element</code>元素的<code>next_ptr</code>指针。同时，分配之后会在原来保存<code>next_ptr</code>的头部和<code>cookie^ptr</code>的尾部，写入<code>0xdeadbeef</code>，避免了信息泄漏。 </li>
+</ul>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li><p>之前的控制内核堆的方法都仍然能继续使用。 <br>
+值得一提的是iOS 6引入的新的数据结构<code>vm_map_copy_t</code>，带有一个指向data区的内核指针、一个控制其指向的data区大小的<code>size field</code>，内核指针返回给用户空间很容易造成任意内核信息泄漏，同时它的size避开了内核堆块的"释放时污染"策略。非常方便进行堆布局和攻击，成为了新的攻击对象。  </p></li>
+<li><p>攻击目标方面，由于<code>cookie</code>保护，除非攻击者能够从泄漏出cookie信息，之前的<code>freelist</code>已经较难使用。</p></li>
+</ul>
+
+<h2 id="ios7">iOS 7</h2>
+
+<h3 id="">特性</h3>
+
+<p><strong>1.大块的堆内存在释放时也有可能被污染了</strong>。可以看到zone的结构体中加了一个重要的字段<code>uint32_t zp_count;</code>。在zone内部的每N次释放，都会进行一次<code>element posion</code>，从下面的代码中可以看到其流程：</p>
+
+<pre><code>boolean_t poison = FALSE;
+
+/* Always poison tiny zones' elements (limit is 0 if -no-zp is set) */
+if (zone-&gt;elem_size &lt;= zp_tiny_zone_limit)
+{
+ poison = TRUE;
+}
+else if (zp_factor != 0 &amp;&amp; ++zone-&gt;zp_count &gt;= zp_factor) 
+{
+ /* Poison zone elements periodically */
+ zone-&gt;zp_count = 0;
+ poison = TRUE;
+}
+
+if (poison) 
+{
+ vm_offset_t *element_cursor = primary + 1;
+
+ for ( ; element_cursor &lt; backup; element_cursor++)
+ {
+  *element_cursor = ZP_POISON;
+ }
+}
+</code></pre>
+
+<p>如果zone的<code>elem_size</code>小于<code>cpu_info.cache_line_size</code>,或者是<code>zp_count</code>自增之后大于<code>zp_factor</code>都会进行posion处理。而这个  <code>zp_factor</code>其实以前一直存在，是一个调试用的特性，启动时会按概率随机地设置成15(25%), 16(50%), 17(25%)三个值。  </p>
+
+<p><strong>2.zone引入了新的内存管理方法</strong>。可以看到最上面的zone结构相比iOS 5的zone结构新增了<code>pages</code>这个字段。</p>
+
+<pre><code>struct {
+    queue_head_t            any_free_foreign;   /* foreign pages crammed into zone */
+    queue_head_t            all_free;
+    queue_head_t            intermediate;
+    queue_head_t            all_used;
+} pages;        /* list of zone_page_metadata structs, which maintain per-page free element lists */
+</code></pre>
+
+<p>依次代表zone外部的内存页(少部分zone允许使用)、全部空闲的内存页、部分使用的内存用、没有空闲块的内存页。这四种内存页面组成4个双向链表，链表上的每个元素代表zone上的一个内存页面的<code>page_meta_data</code>。而<code>pages</code>里的4个元素就是指向这些链表的头部。而<code>page_meta_data</code>的结构则是:</p>
+
+<pre><code>struct zone_page_metadata {
+    queue_chain_t               pages;      //含有metadata的前向指针和后向指针
+    struct zone_free_element    *elements;    //页内的freelist
+    zone_t                      zone;       //指向zone的指针
+    uint16_t                    alloc_count;    //页内最大元素数量
+    uint16_t                    free_count; //freelist上元素数量
+};
+</code></pre>
+
+<p>对于这种带有<code>zone_page_metadata</code>的zone，原来的<code>free_elements</code>字段已经没有任何意义，<code>freelist</code>改为基于page来进行管理。在分配和释放的过程中，根据内存使用情况始终保证在page正确的<code>page queue</code>里面。 <br>
+因为每个page增加了一个<code>metadata</code>，为了合理的利用内存，并不是所有的zone都使用了这个新的<code>zone_page_metadata</code>。可以在zone结构中找到<code>use_page_list</code>这个比特位，来判断是什么类型的zone。而内核设置这个比特位的方法，则是根据<code>elem_size</code>通过评估浪费的内存是否是可以接受的。</p>
+
+<pre><code>/*
+ * Opt into page list tracking if we can reliably map an allocation
+ * to its page_metadata, and if the wastage in the tail of
+ * the allocation is not too large
+ */
+if (alloc == PAGE_SIZE) {
+ if ((PAGE_SIZE % size) &gt;= sizeof(struct zone_page_metadata)) {
+  use_page_list = TRUE;
+ } else if ((PAGE_SIZE - sizeof(struct zone_page_metadata)) % size &lt;= PAGE_SIZE / 100) {
+  use_page_list = TRUE;
+ }
+}
+</code></pre>
+
+<p><br>
+这样的新结构带来的最大好处就是垃圾回收变得更加简单了，只需要回收<code>all_free</code>队列里面的内存页即可。 <br>
+对于安全来说，就是现在可以通过element来反查<code>zone</code>，进而确定一个element是否因内存破坏而被释放到了错误的zone里面造成安全隐患(可惜内核有做这个检测但是并没有抛出错误而是直接忽略掉)。</p>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li>一切的利用方式和以前一样。  </li>
+<li>对攻击来说，就是<code>page_list</code>特性引入了新的攻击点：经典的双向链表"DWORD SHOOT"攻击。 <br>
+从<code>page_list</code>队列中，取出或插入元素时，没有校验前向指针或者后向指针的合法性。</li>
+</ul>
+
+<pre><code>static __inline__ void
+remqueue(
+         queue_entry_t elt)
+{
+ elt-&gt;next-&gt;prev = elt-&gt;prev;
+ elt-&gt;prev-&gt;next = elt-&gt;next;
+ __DEQUEUE_ELT_CLEANUP(elt);
+}
+</code></pre>
+
+<h2 id="ios8">iOS 8</h2>
+
+<h3 id="">特性</h3>
+
+<p><strong>1.为之前的"DWORD SHOOT"攻击增加了"safe unlink"保护</strong></p>
+
+<pre><code>static __inline__ void
+remqueue(
+    queue_entry_t   elt)
+{
+    queue_entry_t   next_elt, prev_elt;
+
+    __QUEUE_ELT_VALIDATE(elt);
+    next_elt = elt-&gt;next;
+    prev_elt = elt-&gt;prev; /* next_elt may equal prev_elt (and the queue head) if elt was the only element */
+    next_elt-&gt;prev = prev_elt;
+    prev_elt-&gt;next = next_elt;
+    __DEQUEUE_ELT_CLEANUP(elt);
+}
+</code></pre>
+
+<p><strong>2.减少了大块元素的污染概率</strong>。污染大块元素是一个比较耗性能的操作，所以现在根据<code>elem_size</code>以及一个<code>zp_scale</code>参数计算出新的污染频率<code>uint32_t sample_factor = zp_factor + (((uint32_t)inner_size) &gt;&gt; zp_scale);</code>.</p>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li>一切的利用方式和以前一样。  </li>
+<li>由于<code>safe unlink</code>特性的引入，攻击<code>page_list</code>的双向链表不再有效。</li>
+</ul>
+
+<h2 id="ios9">iOS 9</h2>
+
+<h3 id="">特性</h3>
+
+<ul>
+<li><p>对<code>vm_map_copy_t</code>加强校验。<code>vm_map_copy_t</code>移除了结构体中的指向data的指针,因为data实际上就在header后面，这个指针会导致内核任意信息泄漏风险；同时移除了原来用来表示整个堆块大小的<code>kalloc_size</code>字段，这是一个无用字段，因为<code>kalloc_size</code>实际上就是"buffer"大小和<code>vm_map_copy_t</code>大小之和。  </p></li>
+<li><p>freelist按照随机顺序进行初始化。从iOS 9.2开始，新分配内存时，每次添加内存进入<code>free_elements</code>的顺序已经不是线性地从一页的开始到结束。而是随机的决定，是添加当前的第一个元素还是当前的最后一个元素。</p></li>
+</ul>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li><p>"freelist"的随机初始化增加的控制堆的难度，我们无法预测某个序列的堆块在一页内存中的具体位置。但控制堆的方法依然不变。仍有很大概率通过堆风水在新初始化的内存中得到两个相邻的堆块，并且新初始化的一页内存的最后两个堆块总是相邻的。  </p></li>
+<li><p>攻击目标方面，通过overwrite<code>vm_map_copy_t</code>结构的<code>size</code>字段，仍然可以造成信息泄漏，但是这个信息泄漏已经被硬编码写死限制在4k大小。  </p></li>
+</ul>
+
+<h2 id="ios10">iOS 10</h2>
+
+<h3 id="">特性</h3>
+
+<ul>
+<li><p>对overwrite <code>vm_map_copy_t</code>结构的<code>size</code>字段做了更多检查;  </p></li>
+<li><p>存储所有zone信息的数组<code>zone_array</code>被放在了内核空间的bss段(之前存放在堆里面)，即一个可以通过内核基址和偏移计算出来的地址；</p></li>
+</ul>
+
+<pre><code>/*
+    source code from  xnu-3789.1.32(iOS 10)
+*/
+
+//zalloc.c
+...
+zone_t zinit(
+    vm_size_t   size,       /* the size of an element */
+    vm_size_t   max,        /* maximum memory to use */
+    vm_size_t   alloc,      /* allocation size */
+    const char  *name)      /* a name for the zone */
+{
+    zone_t      z;
+    boolean_t   use_page_list = FALSE;
+
+    if (zone_zone == ZONE_NULL) {
+
+        z = (struct zone *)zdata;
+        /* special handling in zcram() because the first element is being used */
+    } else
+        z = (zone_t) zalloc(zone_zone); //从堆上分配内存
+...
+
+
+/*
+    source code from  xnu-3248.60.10(prior to iOS 10)
+*/
+
+//zalloc.h 
+...
+extern struct zone zone_array[];    //一个未初始化的全局变量，装载时将在内存空间中被放在bss段
+...
+
+//zalloc.c
+...
+#define MAX_ZONES       256
+struct zone             zone_array[MAX_ZONES];
+...
+...
+...
+zone_t zinit(
+    vm_size_t   size,       /* the size of an element */
+    vm_size_t   max,        /* maximum memory to use */
+    vm_size_t   alloc,      /* allocation size */
+    const char  *name)      /* a name for the zone */
+{
+    zone_t      z;
+
+    simple_lock(&amp;all_zones_lock);
+    z = &amp;(zone_array[zone_array_index]);    //初始化的zone的地址在zone_array
+    zone_array_index++;
+    ...
+}
+</code></pre>
+
+<p><br>
+* 现在所有的zone都使用了<code>page_meta_data</code>(之前因内存浪费问题仅部分使用)，解决之前浪费内存的方式是，不再把<code>meta_data</code>放到内存页里，而是把所有的放到每个zone的<code>zone_map</code>的开头，专门分配了一段空间名为<code>zone_metadata_region</code>来存储这些信息。 </p>
+
+<pre><code>/*
+    source code from  xnu-3789.1.32(iOS 10)
+*/
+//zalloc.h
+struct zone {
+...
+    uint32_t
+    /* boolean_t */ exhaustible        :1,  /* (F) merely return if empty? */
+    /* boolean_t */ collectable        :1,  /* (F) garbage collect empty pages */
+    /* boolean_t */ expandable         :1,  /* (T) expand zone (with message)? */
+    /* boolean_t */ allows_foreign     :1,  /* (F) allow non-zalloc space */
+    /* boolean_t */ doing_alloc_without_vm_priv:1,  /* is zone expanding now via a non-vm_privileged thread? */
+    /* boolean_t */ doing_alloc_with_vm_priv:1, /* is zone expanding now via a vm_privileged thread? */
+    /* boolean_t */ waiting            :1,  /* is thread waiting for expansion? */
+    /* boolean_t */ async_pending      :1,  /* asynchronous allocation pending? */
+    /* boolean_t */ zleak_on           :1,  /* Are we collecting allocation information? */
+    /* boolean_t */ caller_acct        :1,  /* do we account allocation/free to the caller? */  
+    /* boolean_t */ noencrypt          :1,
+    /* boolean_t */ no_callout         :1,
+    /* boolean_t */ async_prio_refill  :1,
+    /* boolean_t */ gzalloc_exempt     :1,
+    /* boolean_t */ alignment_required :1,
+    /* boolean_t */ zone_logging       :1,  /* Enable zone logging for this zone. */
+    /* boolean_t */ zone_replenishing  :1,
+    /* future    */ _reserved          :15;
+
+    /*可以看到之前用来判断是否使用page_list的比特位
+        /* boolean_t */ use_page_list      :1,
+    已经移除
+    */
+...
+}
+
+//zalloc.c
+void
+zone_init(...)
+{
+...
+    zone_map_min_address = zone_min;
+    zone_map_max_address = zone_max;
+
+    zone_pages = (unsigned int)atop_kernel(zone_max - zone_min);
+    zone_metadata_space = round_page(zone_pages * sizeof(struct zone_page_metadata));
+
+    //zone_init里面为zone_metadata_region分配空间
+    retval = kernel_memory_allocate(zone_map, &amp;zone_metadata_region_min, zone_metadata_space,
+                    0, KMA_KOBJECT | KMA_VAONLY | KMA_PERMANENT, VM_KERN_MEMORY_OSFMK);
+...
+}
+</code></pre>
+
+<ul>
+<li><code>page_meta_data</code>结构体所做的改动，则是移除了两个指针，减轻了内核信息泄漏的风险。一个是指向对应的zone的指针，因为现在zone结构的位置固定，通过一个<code>zindex</code>表示zone序列；一个是指向"freelist"的指针，改为用一个<code>freelist_offset</code>表示第一个free元素相对于当前内存页的偏移位置。 <br>
+对于<code>alloc_size</code>大于一个<code>PAGE_SIZE</code>的zone，那些超出一页内存的内存页，<code>page_meta_data</code>和常规的又有些不一样，这种内存页的"metadata"只有两个比较有意义的字段：<code>zindex=0xFF</code>，用来表示这是一个"次要"的metadata；<code>real_metadata_offset</code>，用来表示此页的metadata相对于第一页的metadata的偏移。</li>
+</ul>
+
+<pre><code>struct zone_page_metadata {
+    queue_chain_t       pages;
+
+    //freelist_offset or real_metadata_offset
+    union {
+        uint32_t        freelist_offset;
+        uint32_t        real_metadata_offset; 
+    };
+
+    uint16_t            free_count;
+    uint8_t             zindex;     
+    uint8_t             page_count; 
+};
+...
+...
+static inline struct zone_page_metadata *
+get_zone_page_metadata(struct zone_free_element *element, boolean_t init)
+{
+    struct zone_page_metadata *page_meta = 0;
+
+    if (from_zone_map(element, sizeof(struct zone_free_element))) { 
+        page_meta = (struct zone_page_metadata *)(PAGE_METADATA_FOR_ELEMENT(element));
+        if (init)
+            zone_populate_metadata_page(page_meta);
+    } else {
+        page_meta = (struct zone_page_metadata *)(trunc_page((vm_offset_t)element));
+    }
+    if (init)
+        bzero((char *)page_meta, sizeof(struct zone_page_metadata));
+
+    //判断zindex是否是MULTIPAGE_METADATA_MAGIC，如果是，则通过real_metadata_offset找到真正的page_metadata
+    return ((PAGE_METADATA_GET_ZINDEX(page_meta) != MULTIPAGE_METADATA_MAGIC) ? page_meta : page_metadata_get_realmeta(page_meta));
+}
+</code></pre>
+
+<ul>
+<li>同时，由于所有的zone都使用了<code>page_meta_data</code>，现在所有的堆块都有办法确认自己在哪个zone里面，不需要再去存储堆块的size值了。这样，之前使用<code>MALLOC()</code>等带size字段分配内核内存的方法也可能可以被用来做内核堆布局。因为在之前的<code>MALLOC()</code>中，size字段会被认为是OSOBject的<code>vtable ptr</code>，给利用造成困难。 <br>
+之前的iOS版本上常用的，把一个堆块元素释放到错误的zone，并且在随后的分配中造成溢出的利用方式，也已经完全失效，内核现在可以检测到这种行为并且直接产生<code>panic()</code>。</li>
+</ul>
+
+<pre><code>/*
+    source code from  xnu-3789.1.32(iOS 10)
+*/
+void *
+__MALLOC(
+    size_t      size,
+    int     type,
+    int     flags,
+    vm_allocation_site_t *site)
+{
+    void    *addr = NULL;
+    vm_size_t   msize = size;
+...
+}
+
+/*
+    source code from  xnu-3248.60.10(prior to iOS 10)
+*/
+void *
+__MALLOC(
+    size_t      size,
+    int     type,
+    int     flags,
+    vm_allocation_site_t *site)
+{
+    struct _mhead   *hdr = NULL;
+    size_t      memsize = sizeof (*hdr) + size; //带有一个header
+...
+}
+</code></pre>
+
+<ul>
+<li><code>freelist</code>空表中，每个元素指向下一个元素的指针<code>next_ptr</code>变成了<code>ptr^cookie</code>，这个改变不影响空表的使用，但是降低了内核指针泄漏的风险。更重要的是，在块首存储<code>next_ptr</code>是非常危险的。如果存在一个类型混淆漏洞把freelist中的元素当作OSObject来处理，就会把<code>next_ptr</code>当作是它的<code>vtable ptr</code>，而我们控制了<code>next_ptr</code>里的数据，也就控制了vtable。</li>
+</ul>
+
+<pre><code>static inline void
+free_to_zone(zone_t      zone,
+             vm_offset_t element,
+             boolean_t   poison)
+{
+    ...
+    ...
+    vm_offset_t *primary  = (vm_offset_t *) element;
+    vm_offset_t *backup   = get_backup_ptr(zone-&gt;elem_size, primary);
+    ...
+    old_head = (vm_offset_t)page_metadata_get_freelist(page_meta);
+    ...
+
+    *backup = old_head ^ (poison ? zp_poisoned_cookie : zp_nopoison_cookie);
+
+    //堆块首地址处，即old_head内存储着下一个free element的地址，把它和zp_nopoison_cookie做异或运算
+    *primary             = old_head ^ zp_nopoison_cookie;
+    page_metadata_set_freelist(page_meta, (struct zone_free_element *)element);
+    ...
+    ...
+}
+</code></pre>
+
+<h3 id="">利用</h3>
+
+<ul>
+<li><p>之前的堆布局方法依然有效。 <br>
+有所变化的是，由于去掉了<code>size field</code>，使用MALLOC()分配的内存现在也可以进行堆风水/堆喷射了。  </p></li>
+<li><p>攻击目标的话，如上面第五点所说，修改<code>size field</code>导致free进入错误的zone这种方法已经不可用； <br>
+Stefen Esser在其ppt中隐晦地提到了<code>mach port</code>可能会成为新的攻击目标，而在最近10月份，Ian Beer发了一篇<a href="https://googleprojectzero.blogspot.hk/">task_t considered harmful</a>讲述了攻击mach port的方式.</p></li>
+</ul>
+
+<h2 id="ref">Ref</h2>
+
+<p>1.Stefan Esser, <a href="http://gsec.hitb.org/materials/sg2016/D2%20-%20Stefan%20Esser%20-%20iOS%2010%20Kernel%20Heap%20Revisited.pdf">iOS 10 - Kernel Heap Revisited</a>. <br>
+2.Tarjei Mandt, <a href="http://blog.azimuthsecurity.com/2013/12/attacking-zone-page-metadata-in-ios-7.html">Attacking Zone Page Metadata in iOS 7 and OS X Mavericks</a>. <br>
+3.Stefan Esser, <a href="https://media.blackhat.com/bh-us-12/Briefings/Esser/BH_US_12_Esser_iOS_Kernel_Heap_Armageddon_WP.pdf">iOS Kernel Heap Armageddon</a>.  </p>
+<!-- content end -->
+</div>
+<br>
+<br>
+    <div id="disqus_thread"></div>
+	<div class="footer">
+		<p>© Copyright 2014 by isnowfy, Designed by isnowfy</p>
+	</div>
+</div>
+<script src="main.js"></script>
+<script id="content" type="text/mustache">
+    <h1>{{title}}</h1>
+    <div class="tag">
+    {{date}}
+    {{#tags}}
+    <a href="/#/tag/{{name}}">#{{name}}</a>
+    {{/tags}}
+    </div>
+</script>
+<script id="pagesTemplate" type="text/mustache">
+    {{#pages}}
+    <li>
+        <a href="{{path}}">{{title}}</a>
+    </li>
+    {{/pages}}
+</script>
+<script>
+$(document).ready(function() {
+    $.ajax({
+        url: "main.json",
+        type: "GET",
+        dataType: "json",
+        success: function(data) {
+            $("#title").html(data.name);
+            var pagesTemplate = Hogan.compile($("#pagesTemplate").html());
+            var pagesHtml = pagesTemplate.render({"pages": data.pages});
+            $("#pages").append(pagesHtml);
+            //path
+            var path = "heap.html";
+            //path end
+            var now = 0;
+            for (var i = 0; i < data.posts.length; ++i)
+                if (path == data.posts[i].path)
+                    now = i;
+            var post = data.posts[now];
+            var tmp = post.tags.split(" ");
+            var tags = [];
+            for (var i = 0; i < tmp.length; ++i)
+                if (tmp[i].length > 0)
+                    tags.push({"name": tmp[i]});
+            var contentTemplate = Hogan.compile($("#content").html());
+            var contentHtml = contentTemplate.render({"title": post.title, "tags": tags, "date": post.date});
+            $("#main").prepend(contentHtml);
+            if (data.disqus_shortname.length > 0) {
+                var disqus_shortname = data.disqus_shortname;
+                (function() {
+                    var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+                    dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+                    (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+                })();
+            }
+        }
+    });
+});
+</script>
+<script src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ["\\(", "\\)"]], processEscapes: true}});
+</script>
+</body>
+</html>
