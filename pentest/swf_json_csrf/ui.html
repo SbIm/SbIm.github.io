@@ -1,0 +1,96 @@
+<html>
+<head>
+<script src="assets/jquery-3.3.1.min.js"></script>
+<link rel="stylesheet" href="assets/bootstrap.min.css">
+</head>
+<body>
+<div class="form-horizontal">
+<fieldset>
+<center><legend>SWF CSRF Tool</legend></center>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="PHP redirector">PHP redirector</label>  
+  <div class="col-md-4">
+  <input id="phpredir" name="PHP redirector" type="text" value="" placeholder="https://example.com/test.php or blank for testing crossdomain.xml misconfig" class="form-control input-md">
+    
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="Destination">Destination</label>  
+  <div class="col-md-4">
+  <input id="endpoint" name="Destination" type="text" placeholder="https://example.com/endpoint/" class="form-control input-md" required="">
+    
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="reqm">Request method</label>  
+  <div class="col-md-4">
+  <input id="reqm" name="reqm" type="text" placeholder="e.g. POST" class="form-control input-md" value="POST">
+    
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="ctype">Content-Type</label>  
+  <div class="col-md-4">
+  <input id="ctype" name="ctype" type="text" placeholder="e.g. text/plain" value="application/json" class="form-control input-md">
+    
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="postdata">POST Data</label>
+  <div class="col-md-4">                     
+    <textarea class="form-control" id="postdata" name="postdata" placeholder="">{"test":"test"}</textarea>
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="response">Response</label>
+  <div class="col-md-4">                     
+    <textarea class="form-control" id="response" placeholder="Response from server (if crossdomain.xml allows it)" name="response"></textarea>
+  </div>
+</div>
+
+<div class="form-group">
+  <label class="col-md-4 control-label" for="exec"></label>
+  <div class="col-md-4">
+    <button id="exec" name="exec" class="btn btn-primary">Launch</button>
+  </div>
+</div>
+
+</fieldset>
+</div>
+
+</body>
+
+<script>
+$(function() {
+$( "#exec" ).click(function() {
+//remove all created elements from previous requests
+$( "embed" ).remove();
+//get URL and read parameters
+var url = new URL(window.location.href);
+var e = encodeURIComponent(encodeURIComponent(document.getElementById("endpoint").value));
+var r = document.getElementById("reqm").value;
+var c = document.getElementById("ctype").value;
+var d = document.getElementById("postdata").value;
+var p = document.getElementById("phpredir").value;
+//create embed object, and call SWF with defined parameters
+var obj = document.createElement("embed");
+obj.src="test.swf?endpoint="+e+"&reqmethod="+r+"&ct="+c+"&jsonData="+d+"&php_url="+p;
+$("body").append(obj);
+});
+
+//function for SWF ExternalInterface.call method - to receive the response from SWF
+
+});
+
+function process(data)
+{
+document.getElementById("response").innerText=data;
+}
+</script>
+</html>
